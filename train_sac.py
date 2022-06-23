@@ -6,14 +6,16 @@ import pickle
 import os
 from collections import defaultdict
 from itertools import count
-from copy import deepcopy
-from utils import add_args, setup, set_seed, make_grid, get_rewards, make_model, get_one_hot, get_mask
+from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
     parser = argparse.ArgumentParser(description='SAC for hypergrid environment')
     parser.add_argument(
         '--sac_alpha', type=float, default=0.98 * np.log(1 / 3)
+    )
+    parser.add_argument(
+        '--tau', type=float, default=0.
     )
     return parser
 
@@ -44,35 +46,25 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    pol = make_model(
-        [n * h] + [args.hidden_size] * args.num_layers + [n + 1]
-    )
-    pol.to(device)
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
+    model.to(device)
 
-    Q_1 = make_model(
-        [n * h] + [args.hidden_size] * args.num_layers + [n + 1]
-    )
-    Q_1.to(device)
+    Qm1 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
+    Qm1.to(device)
 
-    Q_2 = make_model(
-        [n * h] + [args.hidden_size] * args.num_layers + [n + 1]
-    )
-    Q_2.to(device)
+    Qm2 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
+    Qm2.to(device)
 
-    Qt1 = make_model(
-        [n * h] + [args.hidden_size] * args.num_layers + [n + 1]
-    )
+    Qt1 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     Qt1.to(device)
 
-    Qt2 = make_model(
-        [n * h] + [args.hidden_size] * args.num_layers + [n + 1]
-    )
+    Qt2 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     Qt2.to(device)
 
     learned_alpha = torch.tensor([args.sac_alpha], requires_grad=True, device=device)
 
     optimizer = optim.Adam(
-        params=list(pol.parameters()) + list(Q_1.parameters()) + list(Q_2.parameters()) + [learned_alpha], lr=0.0001
+        params=list(model.parameters()) + list(Qm1.parameters()) + list(Qm2.parameters()) + [learned_alpha], lr=0.0001
     )
 
     total_loss = []
@@ -101,27 +93,17 @@ def main():
             non_done_states = states[~dones]
 
             with torch.no_grad():
-                outputs = pol(get_one_hot(non_done_states, h).view(non_done_states.size(0), -1))
+                outputs = model(get_one_hot(non_done_states, h))
             prob_mask = get_mask(non_done_states, h)
             log_probs = torch.log_softmax(outputs - 1e10 * prob_mask, -1)
-            sampling_probs = (
-                    (1. - args.random_action_prob) * (log_probs / args.temp).softmax(1)
-                    + args.random_action_prob * (1 - prob_mask) / (1 - prob_mask + 1e-20).sum(1).unsqueeze(1)
-            )
-            actions = sampling_probs.multinomial(1)
+            actions = (log_probs / args.temp).softmax(1).multinomial(1)
 
-            induced_states = deepcopy(non_done_states)
+            induced_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
                     induced_states[i, action] += 1
 
             terminates = (actions.squeeze(-1) == n)
-
-            for state in non_done_states[terminates]:
-                state_id = (state * coordinate).sum().item()
-                total_visited_states.append(state_id)
-                if first_visited_states[state_id] < 0:
-                    first_visited_states[state_id] = step
 
             # Update batches
             c = count(0)
@@ -130,7 +112,13 @@ def main():
                     sorted(m.items()), non_done_states, actions, induced_states, terminates.float()
             ):
                 rs = get_rewards(s, h, R0) if t else torch.tensor(0., device=device)
-                trajectories[i].append([ps.view(1, -1), pa, s.view(1, -1), rs.view(-1), t.view(-1)])
+                trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), rs.view(-1), t.view(-1)])
+
+            for state in non_done_states[terminates]:
+                state_id = (state * coordinate).sum().item()
+                total_visited_states.append(state_id)
+                if first_visited_states[state_id] < 0:
+                    first_visited_states[state_id] = step
 
             # Update dones
             dones[~dones] |= terminates
@@ -141,39 +129,41 @@ def main():
         parent_states, parent_actions, induced_states, rewards, finishes = [
             torch.cat(i) for i in zip(*sum(trajectories.values(), []))
         ]
+        finishes = finishes.unsqueeze(1)
 
-        parent_one_hot = get_one_hot(parent_states, h).view(parent_states.size(0), -1)
+        parent_one_hot = get_one_hot(parent_states, h)
         parent_mask = get_mask(parent_states, h)
-        print(parent_states)
-        print(parent_mask)
-        print('=' * 100)
 
-        parent_log_probs = torch.log_softmax(pol(parent_one_hot) - 1e10 * parent_mask, -1)
+        parent_log_probs = torch.log_softmax(model(parent_one_hot) - 1e10 * parent_mask, -1)
         parent_probs = parent_log_probs.exp()
 
-        q1s = Q_1(parent_one_hot) * (1 - parent_mask)
-        q1a = q1s.gather(dim=1, index=parent_actions.unsqueeze(-1)).squeeze(-1)
+        Q1_logits = Qm1(parent_one_hot) * (1 - parent_mask)
+        Q1_sa = Q1_logits.gather(dim=1, index=parent_actions).squeeze(1)
 
-        q2s = Q_2(parent_one_hot) * (1 - parent_mask)
-        q2a = q2s.gather(dim=1, index=parent_actions.unsqueeze(-1)).squeeze(-1)
+        Q2_logits = Qm2(parent_one_hot) * (1 - parent_mask)
+        Q2_sa = Q2_logits.gather(dim=1, index=parent_actions).squeeze(1)
 
-        children_one_hot = get_one_hot(induced_states, h).view(induced_states.size(0), -1)
+        children_one_hot = get_one_hot(induced_states, h)
         children_mask = get_mask(induced_states, h)
 
         with torch.no_grad():
-            children_log_probs = torch.log_softmax(pol(children_one_hot) - 1e10 * children_mask, -1)
+            children_log_probs = torch.log_softmax(model(children_one_hot) - 1e10 * children_mask, -1)
             children_probs = children_log_probs.exp()
-            qt1 = Qt1(children_one_hot) * (1 - children_mask)
-            qt2 = Qt2(children_one_hot) * (1 - children_mask)
+            Qt1_logits = Qt1(children_one_hot) * (1 - children_mask)
+            Qt2_logits = Qt2(children_one_hot) * (1 - children_mask)
 
-        vcs1 = ((1 - finishes.unsqueeze(1)) * children_probs * (qt1 - learned_alpha * children_log_probs)).sum(1)
-        vcs2 = ((1 - finishes.unsqueeze(1)) * children_probs * (qt2 - learned_alpha * children_log_probs)).sum(1)
+        values1 = ((1 - finishes) * children_probs * (Qt1_logits - learned_alpha * children_log_probs)).sum(1)
+        values2 = ((1 - finishes) * children_probs * (Qt2_logits - learned_alpha * children_log_probs)).sum(1)
 
-        J_Qs = (0.5 * (q1a - rewards - vcs1).pow(2) + 0.5 * (q2a - rewards - vcs2).pow(2)).mean()
-        J_pi = (parent_probs * (learned_alpha * parent_log_probs - torch.min(q1s, q2s).detach())).sum(1).mean()
+        J_Qs = 0.5 * ((Q1_sa - rewards - values1).pow(2) + (Q2_sa - rewards - values2).pow(2)).mean()
+        minQ = torch.min(Q1_logits, Q2_logits).detach()
+        J_pi = (parent_probs * (learned_alpha * parent_log_probs - minQ)).sum(1).mean()
         J_alpha = (parent_probs.detach() * (args.sac_alpha - learned_alpha * parent_log_probs.detach())).sum(1).mean()
 
-        R = get_rewards(states, h, R0)
+        for A, B in [(Qm1, Qt1), (Qm2, Qt2)]:
+            for a, b in zip(A.parameters(), B.parameters()):
+                b.data.mul_(1. - args.tau).add_(args.tau * a)
+
         loss = J_Qs + J_pi + J_alpha
 
         loss.backward()
@@ -183,7 +173,7 @@ def main():
         total_J_Qs.append(J_Qs.item())
         total_J_pi.append(J_pi.item())
         total_J_alpha.append(J_alpha.item())
-        total_reward.append(R.mean().item())
+        total_reward.append(get_rewards(states, h, R0).mean().item())
 
         if step % 100 == 0:
             emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)

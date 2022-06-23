@@ -5,14 +5,11 @@ import numpy as np
 import argparse
 import pickle
 import os
-from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
+from utils import add_args, setup, set_seed, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='TB-based GFlowNet for hypergrid environment')
-    parser.add_argument(
-        '--uniform_PB', type=int, choices=[0, 1], default=1
-    )
+    parser = argparse.ArgumentParser(description='TB-Tree-based GFlowNet for hypergrid environment')
     return parser
 
 
@@ -29,7 +26,7 @@ def main():
     R0 = args.R0
     bsz = args.bsz
 
-    exp_name = 'tb_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB)
+    exp_name = 'tbt_{}_{}_{}'.format(n, h, R0)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -42,7 +39,7 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 1])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     model.to(device)
     log_Z = nn.Parameter(torch.zeros((1,), device=device))
 
@@ -77,25 +74,25 @@ def main():
 
             # Output: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
             # logits: [non_done_bsz, 2 * n + 1]
-            outputs = model(get_one_hot(non_done_states, h))
-
-            # Backward policy, i.e., given an object, samples a plausible trajectory that leads to it.
-            logits_PB = outputs[:, n + 1:2 * n + 1]
-            logits_PB = (0 if args.uniform_PB else 1) * logits_PB
-            edge_mask = get_mask(non_done_states, h, is_backward=True)
-            log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
+            outputs = model(get_one_hot(non_done_states, h).view(non_done_states.size(0), -1))
 
             # Use the previous chosen actions, because PB is calculated on the same trajectory as PF.
             if actions is not None:
-                loss_TB[~dones] -= log_ProbB.gather(dim=1, index=actions[actions != n].unsqueeze(1)).squeeze(1)
+                loss_TB[~dones] -= 0.
 
             # Forward policy
+            # edge_mask: We can't exceed the edge coordinates, e.g., (H - 1, xxx), (xxx, H - 1), (H - 1, H - 1)
+            # stop_mask: any state can be a terminal state, so we append a 1 at the end
             logits_PF = outputs[:, :n + 1]
             prob_mask = get_mask(non_done_states, h)
             log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
-            actions = (log_ProbF / args.temp).softmax(1).multinomial(1)
+            sampling_probs = (
+                    (1. - args.random_action_prob) * (log_ProbF / args.temp).softmax(1)
+                    + args.random_action_prob * (1 - prob_mask) / (1 - prob_mask + 1e-20).sum(1).unsqueeze(1)
+            )
+            actions = sampling_probs.multinomial(1)
 
-            loss_TB[~dones] += log_ProbF.gather(dim=1, index=actions).squeeze(-1)
+            loss_TB[~dones] += log_ProbF.gather(dim=1, index=actions).squeeze(1)
 
             terminates = (actions.squeeze(-1) == n)
 

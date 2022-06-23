@@ -2,12 +2,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 import logging
 import random
 import os
-from copy import deepcopy
 
 
 device = torch.device('cuda')
@@ -37,9 +35,6 @@ def add_args(parser):
     )
     parser.add_argument(
         '--temp', type=float, default=1.
-    )
-    parser.add_argument(
-        '--random_action_prob', type=float, default=0.
     )
     parser.add_argument(
         '--seed', type=int, default=42
@@ -100,10 +95,12 @@ def make_model(num_units, tail=None):
 
 
 def get_one_hot(s, h):
-    return F.one_hot(s, h).float()
+    return F.one_hot(s, h).view(s.size(0), -1).float()
 
 
 def get_mask(states, h, is_backward=False):
+    # edge_mask: We can't exceed the edge coordinates, e.g., (H - 1, xxx), (xxx, H - 1), (H - 1, H - 1)
+    # stop_mask: any state can be a terminal state, so we append a 1 at the end
     if is_backward:
         return (states == 0).float()
     edge_mask = (states == h - 1).float()
@@ -122,18 +119,16 @@ def plot_policy(model, grid, n, h, step, exp_path):
     num_grids = grid.size(0)
     model.eval()
     with torch.no_grad():
-        logits = model(get_one_hot(grid, h).view(num_grids, -1))
-        logits_PF, logits_PB = logits[:, :n + 1], logits[:, n + 1:2 * n + 1]
-        log_ProbF = torch.log_softmax(
-            logits_PF - 1e10 * torch.cat([grid.eq(h - 1).float(), torch.zeros((num_grids, 1), device=device)], 1), -1
-        )
-        log_ProbB = torch.log_softmax(
-            logits_PB - 1e10 * (grid == 0).float(), -1
-        )
+        outputs = model(get_one_hot(grid, h))
+    logits_PF, logits_PB = outputs[:, :n + 1], outputs[:, n + 1:2 * n + 1]
+    prob_mask = get_mask(grid, h)
+    log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
+    edge_mask = get_mask(grid, h, is_backward=True)
+    log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
     grid = grid.cpu().numpy()
     ProbF = log_ProbF.exp().cpu().numpy()
     ProbB = log_ProbB.exp().cpu().numpy()
-    fig, axes = plt.subplots(ncols=2, figsize=(10, 5))
+    fig, axes = plt.subplots(ncols=2, figsize=(12, 4))
     for i in range(num_grids):
         for action in [0, 1]:
             if action == 0:
@@ -159,60 +154,9 @@ def plot_policy(model, grid, n, h, step, exp_path):
     axes[0].scatter(
         x=grid[:, 0], y=grid[:, 1], s=ProbF[:, 2] * 200, marker='8', color='r'
     )
+    axes[0].tick_params(axis='both', which='major', labelsize=10)
     axes[0].set_title('Forward Policy')
+    axes[1].tick_params(axis='both', which='major', labelsize=10)
     axes[1].set_title('Backward Policy')
-    plt.tick_params(axis='both', which='major', labelsize=10)
     plt.tight_layout()
     plt.savefig(os.path.join(exp_path, f'traj_{step}.png'), bbox_inches='tight', format='png', dpi=200)
-
-
-def sample_trajectories(model, rewards, bsz, n, h, exp_path):
-    model.eval()
-    with torch.no_grad():
-        states = torch.zeros((bsz, n), dtype=torch.long, device=device)
-        dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
-        trajectories = [deepcopy(states).cpu().numpy()]
-        while torch.any(~dones):
-            # ~dones: non-dones
-            num_non_dones = (~dones).sum().item()
-            non_done_states = states[~dones]
-            logits = model(F.one_hot(non_done_states, h).view(num_non_dones, -1).float())
-            edge_mask = non_done_states.eq(h - 1).float()
-            stop_mask = torch.zeros((num_non_dones, 1), device=device)
-            prob_mask = torch.cat([edge_mask, stop_mask], 1)
-            log_ProbF = torch.log_softmax(
-                logits[..., :n + 1] - 1e10 * prob_mask, -1
-            )
-            actions = log_ProbF.exp().multinomial(1)
-            terminates = (actions.squeeze(-1) == n)
-            # Update dones
-            dones[~dones] |= terminates
-            # Update non-done trajectories
-            with torch.no_grad():
-                non_terminates = actions[~terminates]
-                states[~dones] = states[~dones].scatter_add(
-                    1, non_terminates, torch.ones(non_terminates.size(), dtype=torch.long, device=device)
-                )
-            trajectories.append(deepcopy(states).cpu().numpy())
-        plt.figure()
-        sns.heatmap(
-            rewards.cpu().numpy(), cmap='Blues', linewidths=0.5, square=True, cbar=False
-        )
-        plt.scatter(x=0.5, y=0.5, s=100, marker='*', color='m')
-        plt.gca().invert_yaxis()
-        colors = ['m', 'g', 'r', 'c', 'k', 'b']
-        non_empty_states = np.sum(trajectories[-1], -1) != 0
-        for traj1, traj2 in zip(trajectories[:-1], trajectories[1:]):
-            diff = traj2 - traj1
-            for i in range(bsz):
-                if non_empty_states[i]:
-                    plt.arrow(
-                        x=traj1[i, 0] + 0.5, y=traj1[i, 1] + 0.5, dx=diff[i, 0], dy=diff[i, 1],
-                        width=0.04, ec=colors[i], fc=colors[i]
-                    )
-                    plt.scatter(
-                        x=trajectories[-1][i, 0] + 0.5, y=trajectories[-1][i, 1] + 0.5, s=100, marker='o',
-                        color=colors[i]
-                    )
-        plt.tight_layout()
-        plt.savefig(os.path.join(exp_path, 'sample.png'), bbox_inches='tight', format='png', dpi=200)

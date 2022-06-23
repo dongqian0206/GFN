@@ -3,8 +3,7 @@ import numpy as np
 import argparse
 import pickle
 import os
-from copy import deepcopy
-from utils import add_args, setup, set_seed, make_grid, get_rewards
+from utils import add_args, set_seed, setup, make_grid, get_rewards
 
 
 def get_train_args():
@@ -46,31 +45,32 @@ def main():
 
     for step in range(1, args.num_steps + 1):
 
-        actions = torch.randint(0, n * 2, (bsz,))
+        pre_rewards = get_rewards(states, h, R0)
 
-        induced_states = deepcopy(states)
-        for i, action in enumerate(actions):
+        actions = torch.randint(0, n * 2, (bsz,), device=device)
+
+        induced_states = states + 0
+        for i, action in enumerate(actions.squeeze(-1)):
             if action < n:
                 induced_states[i, action] = min(induced_states[i, action] + 1, h - 1)
             if action >= n:
                 induced_states[i, action - n] = max(induced_states[i, action - n] - 1, 0)
 
-        pre_rewards = get_rewards(states, h, R0)
-        new_rewards = get_rewards(induced_states, h, R0)
+        cur_rewards = get_rewards(induced_states, h, R0)
 
-        A = new_rewards / pre_rewards
+        A = cur_rewards / pre_rewards
         U = torch.rand((bsz,), device=device)
 
         updates = (A > U)
 
-        # Update non-done trajectories
-        states[updates] = induced_states[updates]
-
-        for state in states:
+        for state in induced_states[updates]:
             state_id = (state * coordinate).sum().item()
             total_visited_states.append(state_id)
             if first_visited_states[state_id] < 0:
                 first_visited_states[state_id] = step
+
+        # Update non-updated trajectories
+        states[updates] = induced_states[updates]
 
         if step % 100 == 0:
             emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
@@ -80,7 +80,8 @@ def main():
             logger.info('Step: %d, \tL1: %.5f' % (step, l1))
 
     pickle.dump(
-        [total_visited_states, first_visited_states, total_l1_error], open(os.path.join(exp_path, 'out.pkl'), 'wb')
+        [total_visited_states, first_visited_states, total_l1_error],
+        open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 
     logger.info('done.')

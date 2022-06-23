@@ -6,8 +6,7 @@ import pickle
 import os
 from collections import defaultdict
 from itertools import count
-from copy import deepcopy
-from utils import add_args, setup, set_seed, make_grid, get_rewards, make_model, get_one_hot, get_mask
+from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
@@ -19,10 +18,10 @@ def get_train_args():
         '--ppo_num_steps', type=int, default=32
     )
     parser.add_argument(
-        '--clip', type=float, default=0.2
+        '--ppo_clip', type=float, default=0.2
     )
     parser.add_argument(
-        '--entropy_coef', type=float, default=0.1
+        '--ppo_entropy_coef', type=float, default=0.1
     )
     return parser
 
@@ -40,7 +39,7 @@ def main():
     R0 = args.R0
     bsz = args.bsz
 
-    exp_name = 'ppo_{}_{}_{}'.format(n, h, R0)
+    exp_name = 'ppo_{}_{}_{}_{}'.format(n, h, R0, args.ppo_entropy_coef)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -87,28 +86,18 @@ def main():
                 non_done_states = states[~dones]
 
                 with torch.no_grad():
-                    outputs = model(get_one_hot(non_done_states, h).view(non_done_states.size(0), -1))
+                    outputs = model(get_one_hot(non_done_states, h))
                 prob_mask = get_mask(non_done_states, h)
                 log_probs = torch.log_softmax(outputs[:, :-1] - 1e10 * prob_mask, -1)
-                sampling_probs = (
-                        (1. - args.random_action_prob) * (log_probs / args.temp).softmax(1)
-                        + args.random_action_prob * (1 - prob_mask) / (1 - prob_mask + 1e-20).sum(1).unsqueeze(1)
-                )
-                actions = sampling_probs.multinomial(1)
+                actions = (log_probs / args.temp).softmax(1).multinomial(1)
                 log_probs = log_probs.gather(dim=1, index=actions).squeeze(1)
 
-                induced_states = deepcopy(non_done_states)
+                induced_states = non_done_states + 0
                 for i, action in enumerate(actions.squeeze(-1)):
                     if action < n:
                         induced_states[i, action] += 1
 
                 terminates = (actions.squeeze(-1) == n)
-
-                for state in non_done_states[terminates]:
-                    state_id = (state * coordinate).sum().item()
-                    total_visited_states.append(state_id)
-                    if first_visited_states[state_id] < 0:
-                        first_visited_states[state_id] = step
 
                 # Update batches
                 c = count(0)
@@ -121,6 +110,12 @@ def main():
                         [ps.view(1, -1), pa.view(1, -1), s.view(1, -1), rs.view(-1), t.view(-1), lp.view(-1)]
                     )
 
+                for state in non_done_states[terminates]:
+                    state_id = (state * coordinate).sum().item()
+                    total_visited_states.append(state_id)
+                    if first_visited_states[state_id] < 0:
+                        first_visited_states[state_id] = step
+
                 # Update dones
                 dones[~dones] |= terminates
 
@@ -131,20 +126,16 @@ def main():
 
             # Compute advantages
             for tau in batches.values():
-                parent_state, parent_action, induced_state, reward, finish, log_probs = [
+                parent_state, parent_action, induced_state, reward, finish, log_prob = [
                     torch.cat(i) for i in zip(*tau)
                 ]
                 with torch.no_grad():
-                    outputs_ps = model(
-                        get_one_hot(parent_state, h).view(parent_state.size(0), -1)
-                    )
-                    outputs_is = model(
-                        get_one_hot(induced_state, h).view(induced_state.size(0), -1)
-                    )
-                adv = reward + outputs_is[:, -1] * (1 - finish) - outputs_ps[:, -1]
+                    outputs_ps = model(get_one_hot(parent_state, h))
+                    outputs_is = model(get_one_hot(induced_state, h))
+                adv = reward + outputs_is[:, -1] * (1. - finish) - outputs_ps[:, -1]
                 for i, A in zip(tau, adv):
-                    i.append(reward[-1].view(1, -1))
-                    i.append(A.view(1, -1))
+                    i.append(reward[-1].unsqueeze(0))
+                    i.append(A.unsqueeze(0))
 
             trajectories += sum(batches.values(), [])
 
@@ -156,22 +147,18 @@ def main():
             parent_states, parent_actions, induced_states, rewards, finishes, pre_log_probs, Gs, As = [
                 torch.cat(i) for i in zip(*[trajectories[i] for i in idxs])
             ]
-
-            outputs = model(
-                get_one_hot(parent_states, h).view(parent_states.size(0), -1)
-            )
+            outputs = model(get_one_hot(parent_states, h))
             logits, values = outputs[:, :-1], outputs[:, -1]
             prob_mask = get_mask(parent_states, h)
             log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
-            new_log_probs = log_probs.gather(dim=1, index=parent_actions).squeeze(1)
+            cur_log_probs = log_probs.gather(dim=1, index=parent_actions).squeeze(1)
+            ratio = torch.exp(cur_log_probs - pre_log_probs)
 
-            ratio = torch.exp(new_log_probs - pre_log_probs)
             val_loss = 0.5 * (Gs - values).pow(2).mean()
-            act_loss = -torch.min(As * ratio, As * ratio.clamp(1. - args.clip, 1. + args.clip)).mean()
+            act_loss = -torch.min(As * ratio, As * ratio.clamp(1. - args.ppo_clip, 1. + args.ppo_clip)).mean()
             entropy = -(log_probs.exp() * log_probs).sum(-1).mean()
 
-            R = np.array([get_rewards(states, h, R0).cpu().numpy() for states in terminal_states])
-            loss = val_loss + act_loss - args.entropy_coef * entropy
+            loss = val_loss + act_loss - args.ppo_entropy_coef * entropy
 
             loss.backward()
             optimizer.step()
@@ -180,7 +167,9 @@ def main():
             total_val_loss.append(val_loss.item())
             total_act_loss.append(act_loss.item())
             total_entropy.append(entropy.item())
-            total_reward.append(R.mean())
+            total_reward.append(
+                torch.stack([get_rewards(states, h, R0) for states in terminal_states]).mean().item()
+            )
 
         if step % 100 == 0:
             emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
@@ -194,9 +183,6 @@ def main():
                     np.array(total_reward[-100:]).mean(), l1
                 )
             )
-
-    with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
-        torch.save(model, f)
 
     pickle.dump(
         [total_loss, total_reward, total_visited_states, first_visited_states, total_l1_error],
