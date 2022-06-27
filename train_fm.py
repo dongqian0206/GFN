@@ -58,8 +58,6 @@ def main():
     optimizer = optim.Adam(params=model.parameters(), lr=0.0001)
 
     total_loss = []
-    total_flow_loss = []
-    total_term_loss = []
     total_reward = []
     total_l1_error = []
     total_visited_states = []
@@ -142,16 +140,10 @@ def main():
 
         loss = (in_flow - out_flow).pow(2).mean()
 
-        with torch.no_grad():
-            flow_loss = ((in_flow - out_flow) * (1 - finishes)).pow(2).sum() / ((1 - finishes).sum() + 1e-20)
-            term_loss = ((in_flow - out_flow) * finishes).pow(2).sum() / (finishes.sum() + 1e-20)
-
         loss.backward()
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_flow_loss.append(flow_loss.item())
-        total_term_loss.append(term_loss.item())
         total_reward.append(get_rewards(states, h, R0).mean().item())
 
         if step % 100 == 0:
@@ -160,9 +152,8 @@ def main():
             l1 = np.abs(true_density - emp_density).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tFlow_Loss: %.5f, \tTerminal_Loss: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), np.array(total_flow_loss[-100:]).mean(),
-                    np.array(total_term_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
+                'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
+                    step, np.array(total_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
                 )
             )
 

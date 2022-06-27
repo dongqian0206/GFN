@@ -65,11 +65,13 @@ def main():
 
         # Forward
         edge_mask = (states == h - 1).float()
-        actions_F = (torch.log_softmax(outputs[:, :n] - 1e10 * edge_mask, -1) / args.temp).softmax(1).multinomial(1)
+        log_ProbF = torch.log_softmax(outputs[:, :n] - 1e10 * edge_mask, -1)
+        actions_F = (log_ProbF / args.temp).softmax(1).multinomial(1)
 
         # Backward
         edge_mask = (states == 0).float()
-        actions_B = (torch.log_softmax(outputs[:, n:] - 1e10 * edge_mask, -1) / args.temp).softmax(1).multinomial(1)
+        log_ProbB = torch.log_softmax(outputs[:, n:] - 1e10 * edge_mask, -1)
+        actions_B = (log_ProbB / args.temp).softmax(1).multinomial(1)
 
         split = torch.rand((outputs.size(0), 1), device=device) < 0.5
         actions = actions_F * split + (n + actions_B) * (~split)
@@ -135,9 +137,7 @@ def main():
             emp_density /= emp_density.sum()
             l1 = np.abs(true_density - emp_density).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info(
-                    'Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1)
-                )
+            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
 
     pickle.dump(
         [total_loss, total_visited_states, first_visited_states, total_l1_error],
