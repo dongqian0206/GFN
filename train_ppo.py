@@ -58,9 +58,6 @@ def main():
     optimizer = optim.Adam(params=model.parameters(), lr=0.0001)
 
     total_loss = []
-    total_val_loss = []
-    total_act_loss = []
-    total_entropy = []
     total_reward = []
     total_l1_error = []
     total_visited_states = []
@@ -86,9 +83,9 @@ def main():
                 non_done_states = states[~dones]
 
                 with torch.no_grad():
-                    outputs = model(get_one_hot(non_done_states, h))
+                    logits = model(get_one_hot(non_done_states, h))[:, :-1]
                 prob_mask = get_mask(non_done_states, h)
-                log_probs = torch.log_softmax(outputs[:, :-1] - 1e10 * prob_mask, -1)
+                log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
                 actions = (log_probs / args.temp).softmax(1).multinomial(1)
                 log_probs = log_probs.gather(dim=1, index=actions).squeeze(1)
 
@@ -130,9 +127,9 @@ def main():
                     torch.cat(i) for i in zip(*tau)
                 ]
                 with torch.no_grad():
-                    outputs_ps = model(get_one_hot(parent_state, h))
-                    outputs_is = model(get_one_hot(induced_state, h))
-                adv = reward + outputs_is[:, -1] * (1. - finish) - outputs_ps[:, -1]
+                    values_ps = model(get_one_hot(parent_state, h))[:, -1]
+                    values_is = model(get_one_hot(induced_state, h))[:, -1]
+                adv = reward + values_is * (1. - finish) - values_ps
                 for i, A in zip(tau, adv):
                     i.append(reward[-1].unsqueeze(0))
                     i.append(A.unsqueeze(0))
@@ -164,9 +161,6 @@ def main():
             optimizer.step()
 
             total_loss.append(loss.item())
-            total_val_loss.append(val_loss.item())
-            total_act_loss.append(act_loss.item())
-            total_entropy.append(entropy.item())
             total_reward.append(
                 torch.stack([get_rewards(states, h, R0) for states in terminal_states]).mean().item()
             )
@@ -177,10 +171,8 @@ def main():
             l1 = np.abs(true_density - emp_density).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tValue: %.5f, \tAction: %.5f, \tEntropy: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), np.array(total_val_loss[-100:]).mean(),
-                    np.array(total_act_loss[-100:]).mean(), np.array(total_entropy[-100:]).mean(),
-                    np.array(total_reward[-100:]).mean(), l1
+                'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
+                    step, np.array(total_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
                 )
             )
 

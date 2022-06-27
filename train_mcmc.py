@@ -80,8 +80,7 @@ def main():
             logger.info('Step: %d, \tL1: %.5f' % (step, l1))
 
     pickle.dump(
-        [total_visited_states, first_visited_states, total_l1_error],
-        open(os.path.join(exp_path, 'out.pkl'), 'wb')
+        [total_visited_states, first_visited_states, total_l1_error], open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 
     logger.info('done.')

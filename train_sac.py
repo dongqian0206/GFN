@@ -68,9 +68,6 @@ def main():
     )
 
     total_loss = []
-    total_J_Qs = []
-    total_J_pi = []
-    total_J_alpha = []
     total_reward = []
     total_l1_error = []
     total_visited_states = []
@@ -93,9 +90,9 @@ def main():
             non_done_states = states[~dones]
 
             with torch.no_grad():
-                outputs = model(get_one_hot(non_done_states, h))
+                logits = model(get_one_hot(non_done_states, h))
             prob_mask = get_mask(non_done_states, h)
-            log_probs = torch.log_softmax(outputs - 1e10 * prob_mask, -1)
+            log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
             actions = (log_probs / args.temp).softmax(1).multinomial(1)
 
             induced_states = non_done_states + 0
@@ -112,7 +109,7 @@ def main():
                     sorted(m.items()), non_done_states, actions, induced_states, terminates.float()
             ):
                 rs = get_rewards(s, h, R0) if t else torch.tensor(0., device=device)
-                trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), rs.view(-1), t.view(-1)])
+                trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), rs.view(-1), t.view(1, -1)])
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -129,7 +126,6 @@ def main():
         parent_states, parent_actions, induced_states, rewards, finishes = [
             torch.cat(i) for i in zip(*sum(trajectories.values(), []))
         ]
-        finishes = finishes.unsqueeze(1)
 
         parent_one_hot = get_one_hot(parent_states, h)
         parent_mask = get_mask(parent_states, h)
@@ -137,16 +133,15 @@ def main():
         parent_log_probs = torch.log_softmax(model(parent_one_hot) - 1e10 * parent_mask, -1)
         parent_probs = parent_log_probs.exp()
 
-        Q1_logits = Qm1(parent_one_hot) * (1 - parent_mask)
-        Q1_sa = Q1_logits.gather(dim=1, index=parent_actions).squeeze(1)
+        Qm1_logits = Qm1(parent_one_hot) * (1 - parent_mask)
+        Qm1_sa = Qm1_logits.gather(dim=1, index=parent_actions).squeeze(1)
 
-        Q2_logits = Qm2(parent_one_hot) * (1 - parent_mask)
-        Q2_sa = Q2_logits.gather(dim=1, index=parent_actions).squeeze(1)
-
-        children_one_hot = get_one_hot(induced_states, h)
-        children_mask = get_mask(induced_states, h)
+        Qm2_logits = Qm2(parent_one_hot) * (1 - parent_mask)
+        Qm2_sa = Qm2_logits.gather(dim=1, index=parent_actions).squeeze(1)
 
         with torch.no_grad():
+            children_one_hot = get_one_hot(induced_states, h)
+            children_mask = get_mask(induced_states, h)
             children_log_probs = torch.log_softmax(model(children_one_hot) - 1e10 * children_mask, -1)
             children_probs = children_log_probs.exp()
             Qt1_logits = Qt1(children_one_hot) * (1 - children_mask)
@@ -155,8 +150,8 @@ def main():
         values1 = ((1 - finishes) * children_probs * (Qt1_logits - learned_alpha * children_log_probs)).sum(1)
         values2 = ((1 - finishes) * children_probs * (Qt2_logits - learned_alpha * children_log_probs)).sum(1)
 
-        J_Qs = 0.5 * ((Q1_sa - rewards - values1).pow(2) + (Q2_sa - rewards - values2).pow(2)).mean()
-        minQ = torch.min(Q1_logits, Q2_logits).detach()
+        J_Qs = 0.5 * ((Qm1_sa - rewards - values1).pow(2) + (Qm2_sa - rewards - values2).pow(2)).mean()
+        minQ = torch.min(Qm1_logits, Qm2_logits).detach()
         J_pi = (parent_probs * (learned_alpha * parent_log_probs - minQ)).sum(1).mean()
         J_alpha = (parent_probs.detach() * (args.sac_alpha - learned_alpha * parent_log_probs.detach())).sum(1).mean()
 
@@ -170,9 +165,6 @@ def main():
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_J_Qs.append(J_Qs.item())
-        total_J_pi.append(J_pi.item())
-        total_J_alpha.append(J_alpha.item())
         total_reward.append(get_rewards(states, h, R0).mean().item())
 
         if step % 100 == 0:
@@ -181,10 +173,8 @@ def main():
             l1 = np.abs(true_density - emp_density).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tJ_Qs: %.5f, \tJ_pi: %.5f, \t\tJ_alpha: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), np.array(total_J_Qs[-100:]).mean(),
-                    np.array(total_J_pi[-100:]).mean(), np.array(total_J_alpha[-100:]).mean(),
-                    np.array(total_reward[-100:]).mean(), l1
+                'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
+                    step, np.array(total_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
                 )
             )
 

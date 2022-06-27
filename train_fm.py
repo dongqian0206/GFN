@@ -82,10 +82,10 @@ def main():
             non_done_states = states[~dones]
 
             with torch.no_grad():
-                outputs = model(get_one_hot(non_done_states, h))
+                logits = model(get_one_hot(non_done_states, h))
 
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(outputs - 1e10 * prob_mask, -1)
+            log_ProbF = torch.log_softmax(logits - 1e10 * prob_mask, -1)
             actions = (log_ProbF / args.temp).softmax(1).multinomial(1)
 
             induced_states = non_done_states + 0
