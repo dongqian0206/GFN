@@ -7,8 +7,8 @@ from collections import defaultdict
 from utils import make_grid, get_rewards, get_modes_found
 
 
-n = 2
-h = 64
+n = 4
+h = 8
 bsz = 16
 c = None  # 0.51
 num_steps = 50000
@@ -25,7 +25,7 @@ def get_stats(modes, path):
         l1 = [a[1] for a in L1]
         _stats = {
             'modes_found': modes_found,
-            'num_visited_states': ns,
+            'num_states': ns,
             'l1': l1
         }
         for k, v in _stats.items():
@@ -46,33 +46,14 @@ def main():
     modes_1 = true_rewards_1.view(-1) >= true_rewards_1.max() if c is None else true_rewards_1.view(-1) >= c
     num_modes = modes_1.sum().item()
 
-    # plt.figure()
-    # sns.heatmap(
-    #     true_rewards_1.view((h,) * n).cpu().numpy(), cmap='Blues', linewidths=0.5, square=True, vmin=0., vmax=3.
-    # )
-    # plt.tick_params(axis='both', which='major', labelsize=10)
-    # plt.title(r'$D = %d,~H = %d,~R_{0} = 10^{-1}$' % (n, h))
-    # plt.tight_layout()
-    # plt.show()
-    # plt.savefig('./grid.png', bbox_inches='tight', format='png', dpi=300)
-
     true_rewards_2 = get_rewards(grid, h, R0=0.01)
     modes_2 = true_rewards_2.view(-1) >= true_rewards_2.max() if c is None else true_rewards_2.view(-1) >= c
 
     true_rewards_3 = get_rewards(grid, h, R0=0.001)
     modes_3 = true_rewards_3.view(-1) >= true_rewards_3.max() if c is None else true_rewards_3.view(-1) >= c
 
-    # plt.figure()
-    # sns.heatmap(
-    #     true_rewards_2.view((h,) * n).cpu().numpy(), cmap='Blues', linewidths=0.5, square=True, vmin=0., vmax=3.
-    # )
-    # plt.tick_params(axis='both', which='major', labelsize=10)
-    # plt.title(r'$D = %d,~H = %d,~R_{0} = 10^{-2}$' % (n, h))
-    # plt.tight_layout()
-    # plt.savefig('./grid_.png', bbox_inches='tight', format='png', dpi=300)
-
     methods = {
-        'random': 'Random',
+        # 'random': 'Random',
         'mcmc': 'MCMC',
         'mars': 'MARS',
         # 'ppo': 'PPO',
@@ -85,43 +66,46 @@ def main():
     }
 
     aggregated_stats_1 = get_stats(
-        modes_1, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_0.1/*/*/out.pkl')
+        modes_1, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.1/*/*/out.pkl')
     )
     aggregated_stats_2 = get_stats(
-        modes_2, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_0.01/*/*/out.pkl')
+        modes_2, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.01/*/*/out.pkl')
     )
     aggregated_stats_3 = get_stats(
-        modes_3, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_0.001/*/*/out.pkl')
+        modes_3, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.001/*/*/out.pkl')
     )
 
-    figure, axs = plt.subplots(2, 3, figsize=(15, 8))  # 12, 8
+    figure, axs = plt.subplots(2, 3, figsize=(15, 8))
 
-    colors = ['b', 'b', 'g', 'y', 'k', 'c', 'm', 'r', 'r']
-    styles = ['b-', 'b--', 'g-', 'y-', 'k-', 'c-', 'm-', 'r-', 'r--']
+    cmap = sns.color_palette('tab10')
+    colors = [
+        cmap[3], cmap[3], cmap[2], cmap[6], cmap[5], cmap[1], cmap[7], cmap[8], cmap[0], cmap[0]
+    ]
+    styles = ['-', '--', '-', '-', '-', '-', '-', '-', '-', '--']
 
     for i, data in enumerate([aggregated_stats_1, aggregated_stats_2, aggregated_stats_3]):
         for j, (key, stat) in enumerate(data.items()):
             mean, std = stat['modes_found']
             axs[0, i].plot(
-                np.arange(1, num_steps + 1) * bsz, mean, styles[j], label=methods[key]
+                np.arange(1, num_steps + 1) * bsz, mean, c=colors[j], ls=styles[j], label=methods[key]
             )
             axs[0, i].fill_between(
                 np.arange(1, num_steps + 1) * bsz, mean - std, mean + std, color=colors[j], alpha=0.2
             )
             mean, std = stat['l1']
             axs[1, i].plot(
-                [int(t) for t in stat['num_visited_states'][0]], mean, styles[j], label=methods[key]
+                [int(t) for t in stat['num_states'][0]], mean, c=colors[j], ls=styles[j], label=methods[key]
             )
             axs[1, i].fill_between(
-                [int(t) for t in stat['num_visited_states'][0]], mean - std, mean + std, color=colors[j], alpha=0.2
+                [int(t) for t in stat['num_states'][0]], mean - std, mean + std, color=colors[j], alpha=0.2
             )
             axs[0, i].tick_params(axis='both', which='major', labelsize=10)
             if i == 0:
-                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-1}$' % (h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-1}$' % (h, h, h, h), fontsize=12)
             elif i == 1:
-                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-2}$' % (h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-2}$' % (h, h, h, h), fontsize=12)
             else:
-                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-3}$' % (h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-3}$' % (h, h, h, h), fontsize=12)
             if i == 0:
                 axs[0, i].set_ylabel(r'#Modes Found (Maximum=$%d$)' % num_modes, fontsize=12)
             axs[0, i].set_xscale('log')
@@ -132,7 +116,7 @@ def main():
             if i == 0:
                 axs[1, i].set_ylabel('Empirical L1 Error', fontsize=12)
             axs[1, i].set_xscale('log')
-            axs[1, i].set_xlim([10 ** 3, 10 ** 6])
+            axs[1, i].set_xlim([2 * 10 ** 5, 10 ** 6])
             axs[1, i].ticklabel_format(style='sci', axis='y', scilimits=(0, 0), useMathText=True)
             axs[1, i].grid(linestyle='--')
 
@@ -142,10 +126,9 @@ def main():
         [handles[i] for i in order], [labels[i] for i in order],
         loc='lower center', bbox_to_anchor=(0.5, -0.001), ncol=10, fontsize='medium'
     )
-    # plt.tight_layout()
-    plt.subplots_adjust(left=0.055, right=0.980, top=0.960)
-    # plt.show()
-    plt.savefig('./out.png', bbox_inches='tight', format='png', dpi=300)
+    plt.subplots_adjust(left=0.045, right=0.980, top=0.960, wspace=0.120, hspace=0.160)
+    plt.show()
+    # plt.savefig('./out_4.png', bbox_inches='tight', format='png', dpi=300)
 
 
 if __name__ == '__main__':

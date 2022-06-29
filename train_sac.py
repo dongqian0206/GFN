@@ -42,7 +42,7 @@ def main():
 
     true_rewards = get_rewards(grid, h, R0)
     true_rewards = true_rewards.view((h,) * n)
-    true_density = true_rewards.flatten().softmax(0).cpu().numpy()
+    true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
     first_visited_states = -1 * np.ones_like(true_density)
 
@@ -93,7 +93,7 @@ def main():
                 logits = model(get_one_hot(non_done_states, h))
             prob_mask = get_mask(non_done_states, h)
             log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
-            actions = (log_probs / args.temp).softmax(1).multinomial(1)
+            actions = log_probs.softmax(1).multinomial(1)
 
             induced_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):

@@ -33,7 +33,7 @@ def main():
 
     true_rewards = get_rewards(grid, h, R0)
     true_rewards = true_rewards.view((h,) * n)
-    true_density = true_rewards.flatten().softmax(0).cpu().numpy()
+    true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
     first_visited_states = -1 * np.ones_like(true_density)
 

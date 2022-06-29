@@ -38,7 +38,7 @@ def main():
 
     true_rewards = get_rewards(grid, h, R0)
     true_rewards = true_rewards.view((h,) * n)
-    true_density = true_rewards.flatten().softmax(0).cpu().numpy()
+    true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
     first_visited_states = -1 * np.ones_like(true_density)
 
@@ -93,7 +93,7 @@ def main():
             logits_PF = outputs[:, :n + 1]
             prob_mask = get_mask(non_done_states, h)
             log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
-            actions = (log_ProbF / args.temp).softmax(1).multinomial(1)
+            actions = log_ProbF.softmax(1).multinomial(1)
 
             loss_TB[~dones] += log_ProbF.gather(dim=1, index=actions).squeeze(-1)
 
@@ -134,6 +134,9 @@ def main():
                     step, np.array(total_loss[-100:]).mean(), log_Z.item(), np.array(total_reward[-100:]).mean(), l1
                 )
             )
+
+    with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
+        torch.save(model, f)
 
     pickle.dump(
         [total_loss, total_reward, total_visited_states, first_visited_states, total_l1_error],

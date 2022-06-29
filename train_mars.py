@@ -10,7 +10,7 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 def get_train_args():
     parser = argparse.ArgumentParser(description='MARS for hypergrid environment')
     parser.add_argument(
-        '--dataset_size', type=int, default=0
+        '--dataset_size', type=int, default=0, help='Use more recent trajectories'
     )
     return parser
 
@@ -37,7 +37,7 @@ def main():
 
     true_rewards = get_rewards(grid, h, R0)
     true_rewards = true_rewards.view((h,) * n)
-    true_density = true_rewards.flatten().softmax(0).cpu().numpy()
+    true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
     first_visited_states = -1 * np.ones_like(true_density)
 
@@ -66,12 +66,12 @@ def main():
         # Forward
         edge_mask = (states == h - 1).float()
         log_ProbF = torch.log_softmax(outputs[:, :n] - 1e10 * edge_mask, -1)
-        actions_F = (log_ProbF / args.temp).softmax(1).multinomial(1)
+        actions_F = log_ProbF.softmax(1).multinomial(1)
 
         # Backward
         edge_mask = (states == 0).float()
         log_ProbB = torch.log_softmax(outputs[:, n:] - 1e10 * edge_mask, -1)
-        actions_B = (log_ProbB / args.temp).softmax(1).multinomial(1)
+        actions_B = log_ProbB.softmax(1).multinomial(1)
 
         split = torch.rand((outputs.size(0), 1), device=device) < 0.5
         actions = actions_F * split + (n + actions_B) * (~split)
@@ -91,7 +91,7 @@ def main():
 
         aggregates = (new_rewards > pre_rewards) + (U < 0.05)
 
-        if aggregates.float().sum():
+        if aggregates.sum().item():
             for s, a in zip(states[aggregates], actions[aggregates]):
                 dataset.append((s.unsqueeze(0), a.unsqueeze(0)))
 
@@ -138,6 +138,9 @@ def main():
             l1 = np.abs(true_density - emp_density).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
+
+    with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
+        torch.save(model, f)
 
     pickle.dump(
         [total_loss, total_visited_states, first_visited_states, total_l1_error],

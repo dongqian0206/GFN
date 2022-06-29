@@ -3,7 +3,7 @@ import numpy as np
 import argparse
 import pickle
 import os
-from utils import add_args, set_seed, setup, make_grid, get_rewards
+from utils import add_args, set_seed, setup, make_grid, get_rewards, get_mask
 
 
 def get_train_args():
@@ -33,7 +33,7 @@ def main():
 
     true_rewards = get_rewards(grid, h, R0)
     true_rewards = true_rewards.view((h,) * n)
-    true_density = true_rewards.flatten().softmax(0).cpu().numpy()
+    true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
     first_visited_states = -1 * np.ones_like(true_density)
 
@@ -49,19 +49,23 @@ def main():
         # initial done trajectories: False
         dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
 
+        actions = []
+
         while torch.any(~dones):
 
             # ~dones: non-dones
             non_done_states = states[~dones]
 
-            actions = torch.randint(0, n + 1, (non_done_states.size(0),), device=device)
+            prob_mask = get_mask(non_done_states, h)
+            probs = (1 - prob_mask) / torch.sum(1 - prob_mask, dim=1, keepdim=True)
+            actions = probs.multinomial(1)
 
             induced_states = non_done_states + 0
-            for i, action in enumerate(actions):
+            for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
                     induced_states[i, action] += 1
 
-            terminates = (actions == n)
+            terminates = (actions.squeeze(-1) == n)
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()

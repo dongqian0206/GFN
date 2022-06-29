@@ -28,13 +28,10 @@ def add_args(parser):
         '--num_layers', type=int, default=2
     )
     parser.add_argument(
-        '--num_steps', type=int, default=50000
+        '--num_steps', type=int, default=62500
     )
     parser.add_argument(
         '--bsz', type=int, default=16
-    )
-    parser.add_argument(
-        '--temp', type=float, default=1.
     )
     parser.add_argument(
         '--seed', type=int, default=42
