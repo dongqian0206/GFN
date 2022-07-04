@@ -100,20 +100,20 @@ def main():
             log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
             actions = log_ProbF.softmax(1).multinomial(1)
 
-            loss_DB[~dones, i] += log_ProbF.gather(dim=1, index=actions).squeeze(-1)
+            loss_DB[~dones, i] += log_ProbF.gather(dim=1, index=actions).squeeze(1)
 
             terminates = (actions.squeeze(-1) == n)
+
+            termination_mask = ~dones
+            termination_mask[~dones] &= terminates
+            R = get_rewards(non_done_states[terminates], h, R0)
+            loss_DB[termination_mask, i] -= R.log()
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
                 total_visited_states.append(state_id)
                 if first_visited_states[state_id] < 0:
                     first_visited_states[state_id] = step
-
-            termination_mask = ~dones
-            termination_mask[~dones] &= terminates
-            R = get_rewards(non_done_states[terminates], h, R0)
-            loss_DB[termination_mask, i] -= R.log()
 
             # Update dones
             dones[~dones] |= terminates
@@ -127,7 +127,7 @@ def main():
 
             i += 1
 
-        loss = loss_DB.pow(2).mean()
+        loss = loss_DB.pow(2).sum() / (states.sum(1) + 1).sum()
 
         loss.backward()
         optimizer.step()

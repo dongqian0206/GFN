@@ -49,8 +49,6 @@ def main():
         # initial done trajectories: False
         dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
 
-        actions = []
-
         while torch.any(~dones):
 
             # ~dones: non-dones

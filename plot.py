@@ -7,11 +7,11 @@ from collections import defaultdict
 from utils import make_grid, get_rewards, get_modes_found
 
 
-n = 4
-h = 8
+n = 2
+h = 64
 bsz = 16
 c = None  # 0.51
-num_steps = 50000
+num_steps = 62500
 
 
 def get_stats(modes, path):
@@ -53,10 +53,10 @@ def main():
     modes_3 = true_rewards_3.view(-1) >= true_rewards_3.max() if c is None else true_rewards_3.view(-1) >= c
 
     methods = {
-        # 'random': 'Random',
+        'random': 'Random',
         'mcmc': 'MCMC',
         'mars': 'MARS',
-        # 'ppo': 'PPO',
+        'ppo': 'PPO',
         'sac': 'SAC',
         'fm': 'FM',
         'db_0': 'DB, learned $P_{B}$',
@@ -66,13 +66,13 @@ def main():
     }
 
     aggregated_stats_1 = get_stats(
-        modes_1, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.1/*/*/out.pkl')
+        modes_1, path=glob.glob(f'D:/saved_models/grid_nvidia_v100/grid_{n}_{h}/grid_0.1/*/*/out.pkl')
     )
     aggregated_stats_2 = get_stats(
-        modes_2, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.01/*/*/out.pkl')
+        modes_2, path=glob.glob(f'D:/saved_models/grid_nvidia_v100/grid_{n}_{h}/grid_0.01/*/*/out.pkl')
     )
     aggregated_stats_3 = get_stats(
-        modes_3, path=glob.glob('D:/saved_models/grid_nvidia_v100/grid_4_8/grid_0.001/*/*/out.pkl')
+        modes_3, path=glob.glob(f'D:/saved_models/grid_nvidia_v100/grid_{n}_{h}/grid_0.001/*/*/out.pkl')
     )
 
     figure, axs = plt.subplots(2, 3, figsize=(15, 8))
@@ -101,11 +101,14 @@ def main():
             )
             axs[0, i].tick_params(axis='both', which='major', labelsize=10)
             if i == 0:
-                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-1}$' % (h, h, h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-1}$' % (h, h), fontsize=12)
+                # axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-1}$' % (h, h, h, h), fontsize=12)
             elif i == 1:
-                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-2}$' % (h, h, h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-2}$' % (h, h), fontsize=12)
+                # axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-2}$' % (h, h, h, h), fontsize=12)
             else:
-                axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-3}$' % (h, h, h, h), fontsize=12)
+                axs[0, i].set_title(r'$%d \times %d,~R_{0} = 10^{-3}$' % (h, h), fontsize=12)
+                # axs[0, i].set_title(r'$%d \times %d \times %d \times %d,~R_{0} = 10^{-3}$' % (h, h, h, h), fontsize=12)
             if i == 0:
                 axs[0, i].set_ylabel(r'#Modes Found (Maximum=$%d$)' % num_modes, fontsize=12)
             axs[0, i].set_xscale('log')
@@ -116,11 +119,11 @@ def main():
             if i == 0:
                 axs[1, i].set_ylabel('Empirical L1 Error', fontsize=12)
             axs[1, i].set_xscale('log')
-            axs[1, i].set_xlim([2 * 10 ** 5, 10 ** 6])
+            axs[1, i].set_xlim([1.6 * 10 ** 3, 10 ** 6])
             axs[1, i].ticklabel_format(style='sci', axis='y', scilimits=(0, 0), useMathText=True)
             axs[1, i].grid(linestyle='--')
 
-    handles, labels = plt.gca().get_legend_handles_labels()
+    handles, labels = axs[0, 0].get_legend_handles_labels()
     order = [labels.index(i) for i in methods.values()]
     figure.legend(
         [handles[i] for i in order], [labels[i] for i in order],
@@ -128,7 +131,7 @@ def main():
     )
     plt.subplots_adjust(left=0.045, right=0.980, top=0.960, wspace=0.120, hspace=0.160)
     plt.show()
-    # plt.savefig('./out_4.png', bbox_inches='tight', format='png', dpi=300)
+    # plt.savefig('./out.png', bbox_inches='tight', format='png', dpi=300)
 
 
 if __name__ == '__main__':

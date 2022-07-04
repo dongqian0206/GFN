@@ -1,9 +1,7 @@
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 import pickle
 import glob
-from collections import defaultdict
 from utils import make_grid, get_rewards, get_modes_found
 
 
