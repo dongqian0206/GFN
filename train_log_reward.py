@@ -114,18 +114,18 @@ def main():
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), []) if not traj[-1]])
         ]
 
-        # logR(s) + logPF(s' | s) - logPF(sf | s) --> logR(s) + log \pi(a' | s) - log \pi(stop | s)
+        # logR(s) + logP_F(s' | s) - logP_F(sf | s) --> logR(s) + log \pi_F(a | s) - log \pi_F(stop | s)
         log_ProbF = torch.log_softmax(
             model(get_one_hot(parent_states, h))[:, :n + 1] - 1e10 * get_mask(parent_states, h), -1
         )
         loss_pt = parent_rewards.log() + log_ProbF.gather(dim=1, index=parent_actions).squeeze(1) - log_ProbF[:, n]
 
-        # logR(s') + logPB(s | s') - logPF(sf | s') --> logR(s') + log \pi(a' | s') - log \pi(stop | s')
-        children_logits = model(get_one_hot(induced_states, h))
+        # logR(s') + logP_B(s | s') - logP_F(sf | s') --> logR(s') + log \pi_B(a | s') - log \pi_F(stop | s')
+        induced_logits = model(get_one_hot(induced_states, h))
         log_ProbF = torch.log_softmax(
-            children_logits[:, :n + 1] - 1e10 * get_mask(induced_states, h), -1
+            induced_logits[:, :n + 1] - 1e10 * get_mask(induced_states, h), -1
         )
-        logits_PB = children_logits[:, n + 1:2 * n + 1]
+        logits_PB = induced_logits[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         log_ProbB = torch.log_softmax(
             logits_PB - 1e10 * get_mask(induced_states, h, is_backward=True), -1

@@ -55,7 +55,7 @@ def main():
     model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     model.to(device)
 
-    optimizer = optim.Adam(params=model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(params=model.parameters(), lr=0.001)
 
     total_loss = []
     total_reward = []
