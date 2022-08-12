@@ -10,7 +10,10 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 def get_train_args():
     parser = argparse.ArgumentParser(description='MARS for hypergrid environment')
     parser.add_argument(
-        '--dataset_size', type=int, default=0, help='Use more recent trajectories'
+        '--buffer_size', type=int, default=16
+    )
+    parser.add_argument(
+        '--dataset_size', type=int, default=0, help='Larger, more recent trajectories'
     )
     return parser
 
@@ -27,6 +30,7 @@ def main():
     h = args.h
     R0 = args.R0
     bsz = args.bsz
+    bufsize = args.buffer_size
 
     exp_name = 'mars_{}_{}_{}'.format(n, h, R0)
     logger, exp_path = setup(exp_name, args)
@@ -52,7 +56,7 @@ def main():
     total_visited_states = []
 
     # initial state: s_0 = [0, 0]
-    states = torch.zeros((bsz, n), dtype=torch.long, device=device)
+    states = torch.zeros((bufsize, n), dtype=torch.long, device=device)
 
     for step in range(1, args.num_steps + 1):
 
@@ -73,8 +77,8 @@ def main():
         log_ProbB = torch.log_softmax(outputs[:, n:] - 1e10 * edge_mask, -1)
         actions_B = log_ProbB.softmax(1).multinomial(1)
 
-        split = torch.rand((outputs.size(0), 1), device=device) < 0.5
-        actions = actions_F * split + (n + actions_B) * (~split)
+        splits = torch.rand((outputs.size(0), 1), device=device) < 0.5
+        actions = actions_F * splits + (n + actions_B) * (~splits)
 
         # Backward is allowed in MCMC-based approaches
         induced_states = states + 0
@@ -84,12 +88,12 @@ def main():
             if action >= n:
                 induced_states[i, action - n] = max(induced_states[i, action - n] - 1, 0)
 
-        new_rewards = get_rewards(induced_states, h, R0)
+        cur_rewards = get_rewards(induced_states, h, R0)
 
-        A = new_rewards / pre_rewards
-        U = torch.rand((bsz,), device=device)
+        A = cur_rewards / pre_rewards
+        U = torch.rand((bufsize,), device=device)
 
-        aggregates = (new_rewards > pre_rewards) + (U < 0.05)
+        aggregates = (cur_rewards > pre_rewards) + (U < 0.05)
 
         if aggregates.sum().item():
             for s, a in zip(states[aggregates], actions[aggregates]):
@@ -106,7 +110,7 @@ def main():
         # Update non-updated trajectories
         states[updates] = induced_states[updates]
 
-        if not step % 20 and len(dataset) > args.dataset_size:
+        if not step % 100 and len(dataset) > args.dataset_size:
             dataset = dataset[-args.dataset_size:]
 
         if len(dataset) < bsz:
@@ -116,16 +120,20 @@ def main():
         parent_states, parent_actions = [
             torch.cat(i) for i in zip(*[dataset[i] for i in idxs])
         ]
+
         outputs = model(get_one_hot(parent_states, h))
 
-        log_ProbF = torch.log_softmax(outputs[:, :n] - 1e10 * (parent_states == h - 1).float(), -1).gather(
-            dim=1, index=torch.minimum(parent_actions, torch.tensor(n - 1))
-        )
-        log_ProbB = torch.log_softmax(outputs[:, n:] - 1e10 * (parent_states == 0).float(), -1).gather(
-            dim=1, index=torch.maximum(parent_actions - n, torch.tensor(0))
-        )
-        split = parent_actions < n
-        loss = -(log_ProbF * split + log_ProbB * (~split)).mean()
+        edge_mask = (parent_states == h - 1).float()
+        log_ProbF = torch.log_softmax(outputs[:, :n] - 1e10 * edge_mask, -1)
+
+        edge_mask = (parent_states == 0).float()
+        log_ProbB = torch.log_softmax(outputs[:, n:] - 1e10 * edge_mask, -1)
+
+        splits = parent_actions.squeeze(-1) < n
+        lprobF = log_ProbF.gather(dim=1, index=torch.minimum(parent_actions, torch.tensor(n - 1))).squeeze(-1)
+        lprobB = log_ProbB.gather(dim=1, index=torch.maximum(parent_actions - n, torch.tensor(0))).squeeze(-1)
+
+        loss = -(lprobF * splits + lprobB * (~splits)).mean()
 
         loss.backward()
         optimizer.step()
@@ -133,9 +141,8 @@ def main():
         total_loss.append(loss.item())
 
         if step % 100 == 0:
-            emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
-            emp_density /= emp_density.sum()
-            l1 = np.abs(true_density - emp_density).mean()
+            empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
+            l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
 
@@ -143,7 +150,13 @@ def main():
         torch.save(model, f)
 
     pickle.dump(
-        [total_loss, total_visited_states, first_visited_states, total_l1_error],
+        {
+            'total_loss': total_loss,
+            'total_visited_states': total_visited_states,
+            'first_visited_states': first_visited_states,
+            'num_visited_states_so_far': [a[0] for a in total_l1_error],
+            'total_l1_error': [a[1] for a in total_l1_error]
+        },
         open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 

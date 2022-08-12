@@ -6,6 +6,7 @@ import pickle
 import os
 from collections import defaultdict
 from itertools import count
+from copy import deepcopy
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
@@ -55,11 +56,9 @@ def main():
     Qm2 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     Qm2.to(device)
 
-    Qt1 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
-    Qt1.to(device)
+    Qt1 = deepcopy(Qm1)
 
-    Qt2 = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
-    Qt2.to(device)
+    Qt2 = deepcopy(Qm2)
 
     learned_alpha = torch.tensor([args.sac_alpha], requires_grad=True, device=device)
 
@@ -91,6 +90,7 @@ def main():
 
             with torch.no_grad():
                 logits = model(get_one_hot(non_done_states, h))
+
             prob_mask = get_mask(non_done_states, h)
             log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
             actions = log_probs.softmax(1).multinomial(1)
@@ -130,30 +130,32 @@ def main():
         parent_one_hot = get_one_hot(parent_states, h)
         parent_mask = get_mask(parent_states, h)
 
-        parent_log_probs = torch.log_softmax(model(parent_one_hot) - 1e10 * parent_mask, -1)
-        parent_probs = parent_log_probs.exp()
+        parent_log_ProbF = torch.log_softmax(model(parent_one_hot) - 1e10 * parent_mask, -1)
+        parent_log_ProbF = parent_log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        Qm1_logits = Qm1(parent_one_hot) * (1 - parent_mask)
-        Qm1_sa = Qm1_logits.gather(dim=1, index=parent_actions).squeeze(1)
+        Qm1_sa = Qm1(parent_one_hot).gather(dim=1, index=parent_actions).squeeze(1)
+        Qm2_sa = Qm2(parent_one_hot).gather(dim=1, index=parent_actions).squeeze(1)
 
-        Qm2_logits = Qm2(parent_one_hot) * (1 - parent_mask)
-        Qm2_sa = Qm2_logits.gather(dim=1, index=parent_actions).squeeze(1)
+        children_one_hot = get_one_hot(induced_states, h)
+        children_mask = get_mask(induced_states, h)
 
-        with torch.no_grad():
-            children_one_hot = get_one_hot(induced_states, h)
-            children_mask = get_mask(induced_states, h)
-            children_log_probs = torch.log_softmax(model(children_one_hot) - 1e10 * children_mask, -1)
-            children_probs = children_log_probs.exp()
-            Qt1_logits = Qt1(children_one_hot) * (1 - children_mask)
-            Qt2_logits = Qt2(children_one_hot) * (1 - children_mask)
+        children_log_ProbF = torch.log_softmax(model(children_one_hot) - 1e10 * children_mask, -1)
+        children_actions = children_log_ProbF.softmax(1).multinomial(1)
+        children_log_ProbF = children_log_ProbF.gather(dim=1, index=children_actions).squeeze(1)
 
-        values1 = ((1 - finishes) * children_probs * (Qt1_logits - learned_alpha * children_log_probs)).sum(1)
-        values2 = ((1 - finishes) * children_probs * (Qt2_logits - learned_alpha * children_log_probs)).sum(1)
+        Qt1_sa = Qt1(children_one_hot).gather(dim=1, index=children_actions).squeeze(1)
+        Qt2_sa = Qt2(children_one_hot).gather(dim=1, index=children_actions).squeeze(1)
 
-        J_Qs = 0.5 * ((Qm1_sa - rewards - values1).pow(2) + (Qm2_sa - rewards - values2).pow(2)).mean()
-        minQ = torch.min(Qm1_logits, Qm2_logits).detach()
-        J_pi = (parent_probs * (learned_alpha * parent_log_probs - minQ)).sum(1).mean()
-        J_alpha = (parent_probs.detach() * (args.sac_alpha - learned_alpha * parent_log_probs.detach())).sum(1).mean()
+        target_V = torch.min(Qt1_sa, Qt2_sa) - learned_alpha.detach() * children_log_ProbF
+        target_Q = rewards + (1 - finishes) * target_V
+        target_Q = target_Q.detach()
+
+        J_Qs = 0.5 * ((Qm1_sa - target_Q).pow(2) + (Qm2_sa - target_Q).pow(2)).mean()
+
+        minQ = torch.min(Qm1_sa, Qm2_sa)
+        J_pi = (learned_alpha.detach() * parent_log_ProbF - minQ).mean()
+
+        J_alpha = (learned_alpha * (-parent_log_ProbF + (n + 1)).detach()).mean()
 
         for A, B in [(Qm1, Qt1), (Qm2, Qt2)]:
             for a, b in zip(A.parameters(), B.parameters()):
@@ -169,8 +171,7 @@ def main():
 
         if step % 100 == 0:
             emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
-            emp_density /= emp_density.sum()
-            l1 = np.abs(true_density - emp_density).mean()
+            l1 = np.abs(true_density - emp_density / emp_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info(
                 'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
@@ -179,7 +180,13 @@ def main():
             )
 
     pickle.dump(
-        [total_loss, total_reward, total_visited_states, first_visited_states, total_l1_error],
+        {
+            'total_reward': total_reward,
+            'total_visited_states': total_visited_states,
+            'first_visited_states': first_visited_states,
+            'num_visited_states_so_far': [a[0] for a in total_l1_error],
+            'total_l1_error': [a[1] for a in total_l1_error]
+        },
         open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 

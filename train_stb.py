@@ -5,18 +5,14 @@ import argparse
 import pickle
 import os
 from collections import defaultdict
-from itertools import count
-from copy import deepcopy
+from itertools import count, islice
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='log-reward-based GFlowNet for hypergrid environment')
+    parser = argparse.ArgumentParser(description='SubTB-based GFlowNet for hypergrid environment')
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=1
-    )
-    parser.add_argument(
-        '--bootstrap_tau', type=float, default=0
     )
     return parser
 
@@ -33,9 +29,8 @@ def main():
     h = args.h
     R0 = args.R0
     bsz = args.bsz
-    tau = args.bootstrap_tau
 
-    exp_name = 'lr_{}_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB, tau)
+    exp_name = 'stb_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -48,10 +43,8 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 1])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
-
-    target_model = deepcopy(model)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
@@ -90,19 +83,15 @@ def main():
                 if action < n:
                     induced_states[i, action] += 1
 
-            prs, nrs = get_rewards(non_done_states, h, R0), get_rewards(induced_states, h, R0)
-
             terminates = (actions.squeeze(-1) == n)
 
             # Update batches
             c = count(0)
             m = {j: next(c) for j in range(bsz) if not dones[j]}
-            for (i, _), ps, pa, s, pr, nr, t in zip(
-                    sorted(m.items()), non_done_states, actions, induced_states, prs, nrs, terminates.float()
+            for (i, _), ps, pa, s, t in zip(
+                    sorted(m.items()), non_done_states, actions, induced_states, terminates.float()
             ):
-                trajectories[i].append(
-                    [ps.view(1, -1), pa.view(1, -1), s.view(1, -1), pr.view(-1), nr.view(-1), t.view(-1)]
-                )
+                trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), t.view(-1)])
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -116,39 +105,63 @@ def main():
             # Update non-done trajectories
             states[~dones] = induced_states[~terminates]
 
-        parent_states, parent_actions, induced_states, parent_rewards, induced_rewards, finishes = [
-            torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), []) if not traj[-1]])
+        # Consecutive states
+        parent_states, parent_actions, induced_states, finishes = [
+            torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
+        log_rewards = get_rewards(states, h, R0).log().view(-1, 1)
 
-        # logR(s) + logP_F(s' | s) - logP_F(sf | s) --> logR(s) + log \pi_F(a | s) - log \pi_F(stop | s)
-        logits_PF = model(get_one_hot(parent_states, h))[:, :n + 1]
+        idxs = iter(range(parent_states.size(0)))
+        lens = [len(traj) for traj in trajectories.values()]
+        batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
+
+        mask = trajectories.values()
+
+        outputs = model(get_one_hot(parent_states, h))
+        log_flowF, logits_PF = outputs[:, 2 * n + 1], outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
-        loss_pf = parent_rewards.log() + log_ProbF.gather(dim=1, index=parent_actions).squeeze(1) - log_ProbF[:, n]
+        log_ProbF = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        # logR(s') + logP_B(s | s') - logP_F(sf | s') --> logR(s') + log \pi_B(a | s') - log \pi_F(stop | s')
-        induced_logits = model(get_one_hot(induced_states, h))
-        logits_PB = induced_logits[:, n + 1:2 * n + 1]
+        outputs = model(get_one_hot(induced_states, h))
+        log_flowB, logits_PB = outputs[:, 2 * n + 1], outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
+        log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
+        log_ProbB = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
 
-        if tau > 0:
-            with torch.no_grad():
-                induced_logits = target_model(get_one_hot(induced_states, h))
+        # log F(s_{0}) + \sum_{t=0}^{l} log P_F(s_{t+1} | s_{t}), for l = 0,...,n, s_{0} -- the initial state
+        log_fwd_probs = torch.cat(
+            [log_ProbF.index_select(0, i).cumsum(0) for i in batch_idxs]
+        )
+        loss_fwd_pf = log_flowF[0] + log_fwd_probs
 
-        prob_mask = get_mask(induced_states, h)
-        log_ProbF = torch.log_softmax(induced_logits[:, :n + 1] - 1e10 * prob_mask, -1)
-        loss_pb = induced_rewards.log() + log_ProbB.gather(dim=1, index=parent_actions).squeeze(1) - log_ProbF[:, n]
+        # log F(s_{l+1}) + \sum_{t=0}^{l} log P_B(s_{t} | s_{t+1}), for l = 0,...,n
+        log_bwd_probs = torch.cat(
+            [log_ProbB.index_select(0, i).cumsum(0) for i in batch_idxs]
+        )
+        loss_fwd_pb = log_flowB * (1 - finishes) + log_rewards * finishes + log_bwd_probs
 
-        loss = (loss_pf - loss_pb).pow(2).mean()
+        loss_fwd = (loss_fwd_pf - loss_fwd_pb).pow(2).mean()
+
+        # log F(s_{l}) + \sum_{t=l}^{n} log P_F(s_{t+1} | s_{t}), for l = 0,...,n
+        log_fwd_probs = torch.cat(
+            [log_ProbF.index_select(0, i).flip(0).cumsum(0).flip(0) for i in batch_idxs]
+        )
+        loss_fwd_pf = log_flowF + log_fwd_probs
+
+        # log R(x) + \sum_{t=l}^{n-1} log P_B(s_{t} | s_{t+1}), for l = 0,...,n
+        loss_fwd_pb = torch.cat(
+            [log_ProbB.index_select(0, i).flip(0).cumsum(0).flip(0) + log_rewards[r] for r, i in enumerate(batch_idxs)]
+        )
+
+        loss_bwd = (loss_fwd_pf - loss_fwd_pb).pow(2).mean()
+
+        loss = loss_fwd + loss_bwd
 
         loss.backward()
         optimizer.step()
-
-        if tau > 0:
-            for a, b in zip(model.parameters(), target_model.parameters()):
-                b.data.mul_(1 - tau).add_(tau * a)
 
         total_loss.append(loss.item())
 

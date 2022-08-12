@@ -73,14 +73,19 @@ def main():
         states[updates] = induced_states[updates]
 
         if step % 100 == 0:
-            emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
-            emp_density /= emp_density.sum()
-            l1 = np.abs(true_density - emp_density).mean()
+            empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
+            l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
             logger.info('Step: %d, \tL1: %.5f' % (step, l1))
 
     pickle.dump(
-        [total_visited_states, first_visited_states, total_l1_error], open(os.path.join(exp_path, 'out.pkl'), 'wb')
+        {
+            'total_visited_states': total_visited_states,
+            'first_visited_states': first_visited_states,
+            'num_visited_states_so_far': [a[0] for a in total_l1_error],
+            'total_l1_error': [a[1] for a in total_l1_error]
+        },
+        open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 
     logger.info('done.')

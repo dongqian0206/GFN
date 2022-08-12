@@ -58,14 +58,12 @@ def main():
     optimizer = optim.Adam(params=model.parameters(), lr=0.0001)
 
     total_loss = []
-    total_reward = []
     total_l1_error = []
     total_visited_states = []
 
     for step in range(1, args.num_steps + 1):
 
         trajectories = []
-        terminal_states = []
 
         for _ in range(1, args.data_collection_num_steps + 1):
 
@@ -84,6 +82,7 @@ def main():
 
                 with torch.no_grad():
                     logits = model(get_one_hot(non_done_states, h))[:, :-1]
+
                 prob_mask = get_mask(non_done_states, h)
                 log_probs = torch.log_softmax(logits - 1e10 * prob_mask, -1)
                 actions = log_probs.softmax(1).multinomial(1)
@@ -119,19 +118,17 @@ def main():
                 # Update non-done trajectories
                 states[~dones] = induced_states[~terminates]
 
-            terminal_states += [states]
-
             # Compute advantages
             for tau in batches.values():
-                parent_state, parent_action, induced_state, reward, finish, log_prob = [
+                parent_states, parent_actions, induced_states, rewards, finishes, log_probs = [
                     torch.cat(i) for i in zip(*tau)
                 ]
                 with torch.no_grad():
-                    values_ps = model(get_one_hot(parent_state, h))[:, -1]
-                    values_is = model(get_one_hot(induced_state, h))[:, -1]
-                adv = reward + values_is * (1. - finish) - values_ps
+                    values_ps = model(get_one_hot(parent_states, h))[:, -1]
+                    values_is = model(get_one_hot(induced_states, h))[:, -1]
+                adv = rewards + values_is * (1. - finishes) - values_ps
                 for i, A in zip(tau, adv):
-                    i.append(reward[-1].unsqueeze(0))
+                    i.append(rewards[-1].unsqueeze(0))
                     i.append(A.unsqueeze(0))
 
             trajectories += sum(batches.values(), [])
@@ -161,26 +158,24 @@ def main():
             optimizer.step()
 
             total_loss.append(loss.item())
-            total_reward.append(
-                torch.stack([get_rewards(states, h, R0) for states in terminal_states]).mean().item()
-            )
 
         if step % 100 == 0:
-            emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
-            emp_density /= emp_density.sum()
-            l1 = np.abs(true_density - emp_density).mean()
+            empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
+            l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info(
-                'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
-                )
-            )
+            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
 
     with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
         torch.save(model, f)
 
     pickle.dump(
-        [total_loss, total_reward, total_visited_states, first_visited_states, total_l1_error],
+        {
+            'total_loss': total_loss,
+            'total_visited_states': total_visited_states,
+            'first_visited_states': first_visited_states,
+            'num_visited_states_so_far': [a[0] for a in total_l1_error],
+            'total_l1_error': [a[1] for a in total_l1_error]
+        },
         open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 

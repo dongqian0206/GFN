@@ -43,12 +43,10 @@ def main():
 
     model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
-    log_Z = torch.zeros((1,), device=device)
 
-    optimizer = optim.Adam(params=model.parameters(), lr=0.001)
+    optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
     total_loss = []
-    total_reward = []
     total_l1_error = []
     total_visited_states = []
 
@@ -77,12 +75,11 @@ def main():
             outputs = model(get_one_hot(non_done_states, h))
 
             # log_F(s_0), ..., log_F(s_t)
-            log_flow = outputs[:, 2 * n + 1]
-            loss_DB[~dones, i] += log_flow
+            log_flows = outputs[:, 2 * n + 1]
+            loss_DB[~dones, i] += log_flows
+
             if i > 0:
-                loss_DB[~dones, i - 1] -= log_flow
-            else:
-                log_Z[:] = log_flow[0].item()
+                loss_DB[~dones, i - 1] -= log_flows
 
             # Backward policy, i.e., given an object, samples a plausible trajectory that leads to it.
             logits_PB = outputs[:, n + 1:2 * n + 1]
@@ -133,24 +130,24 @@ def main():
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_reward.append(get_rewards(states, h, R0).mean().item())
 
         if step % 100 == 0:
-            emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
-            emp_density /= emp_density.sum()
-            l1 = np.abs(true_density - emp_density).mean()
+            empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
+            l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info(
-                'Step: %d, \tLoss: %.5f, \tlogZ: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), log_Z.item(), np.array(total_reward[-100:]).mean(), l1
-                )
-            )
+            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
 
     with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
         torch.save(model, f)
 
     pickle.dump(
-        [total_loss, total_reward, total_visited_states, first_visited_states, total_l1_error],
+        {
+            'total_loss': total_loss,
+            'total_visited_states': total_visited_states,
+            'first_visited_states': first_visited_states,
+            'num_visited_states_so_far': [a[0] for a in total_l1_error],
+            'total_l1_error': [a[1] for a in total_l1_error]
+        },
         open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 
