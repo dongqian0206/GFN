@@ -5,14 +5,18 @@ import argparse
 import pickle
 import os
 from collections import defaultdict
-from itertools import count, islice
+from itertools import count
+from copy import deepcopy
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='SubTB-based GFlowNet for hypergrid environment')
+    parser = argparse.ArgumentParser(description='DB-based GFlowNet for hypergrid environment')
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=1
+    )
+    parser.add_argument(
+        '--tau', type=float, default=0.
     )
     return parser
 
@@ -29,8 +33,9 @@ def main():
     h = args.h
     R0 = args.R0
     bsz = args.bsz
+    tau = args.tau
 
-    exp_name = 'stb_fwd_{}_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB, args.lr)
+    exp_name = 'db_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -48,6 +53,8 @@ def main():
 
     model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
+
+    target_model = deepcopy(model)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
@@ -77,9 +84,11 @@ def main():
             non_done_states = states[~dones]
 
             # Output: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
+            # logits: [non_done_bsz, 2 * n + 1]
             with torch.no_grad():
                 outputs = model(get_one_hot(non_done_states, h))
 
+            # Forward policy
             logits_PF = outputs[:, :n + 1]
             prob_mask = get_mask(non_done_states, h)
             log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
@@ -113,67 +122,52 @@ def main():
             # Update non-done trajectories
             states[~dones] = induced_states[~terminates]
 
-        # Consecutive states
         parent_states, parent_actions, induced_states, log_rewards, finishes = [
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
-        # batch_idxs = [[0, 1, 2, 3, 4], [5, 6, 7], [8], ...]
-        idxs = iter(range(parent_states.size(0)))
-        lens = [len(traj) for traj in trajectories.values()]
-        batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
+        batch_idxs = torch.LongTensor(
+            (sum([[i] * len(traj) for i, traj in enumerate(trajectories.values())], []))
+        ).to(device)
 
+        # log F(s_{t}) + log P_F(s_{t+1} | s_{t})
         p_outputs = model(get_one_hot(parent_states, h))
         log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
+        log_PF_edge_flows = log_flowF + log_PF_sa
 
+        # log F(s_{t+1}) + log P_B(s_{t} | s_{t+1})
         i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        if tau > 0:
+            with torch.no_grad():
+                log_flowB = target_model(get_one_hot(induced_states, h))[:, 2 * n + 1]
+        else:
+            log_flowB = i_outputs[:, 2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
-
-        # log F(s_{0}) + \sum_{t=0}^{l} log P_F(s_{t+1} | s_{t}), for l = 0,...,n
-        # log P_F(s1 | s0)
-        # log P_F(s1 | s0) + log P_F(s2 | s1)
-        # log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
-        log_fwd_ProbF = torch.cat(
-            [log_PF_sa.index_select(0, i).cumsum(0) for i in batch_idxs]
-        )
-        # log F(s0) + log P_F(s1 | s0)
-        # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1)
-        # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
-        loss_PF = log_flowF[0] + log_fwd_ProbF
-
-        # log F(s_{l+1}) + \sum_{t=0}^{l} log P_B(s_{t} | s_{t+1}), for l = 0,...,n
-        # log P_B(s0 | s1)
-        # log P_B(s0 | s1) + log P_B(s1 | s2)
-        # log P_B(s0 | s1) + log P_B(s1 | s2)
-        log_fwd_ProbB = torch.cat(
-            [log_PB_sa.index_select(0, i).cumsum(0) for i in batch_idxs]
-        )
-        # log F(s1) + log P_B(s0 | s1)
-        # log F(s2) + log P_B(s1 | s2) + log P_B(s0 | s1)
-        # log R(s3) + log P_B(s1 | s2) + log P_B(s0 | s1)
-        loss_PB = log_flowB * (1 - finishes) + log_rewards * finishes + log_fwd_ProbB
-
-        log_PF_edge_flows = log_flowF + log_PF_sa
         log_PB_edge_flows = log_flowB * (1 - finishes) + log_rewards * finishes + log_PB_sa
 
-        last_idxs = torch.LongTensor([i[-1] for i in batch_idxs]).to(device)
-        log_Z_log_fwd_probs = loss_PF.index_select(0, last_idxs)
-        log_R_log_bwd_probs = loss_PB.index_select(0, last_idxs)
+        log_Z = log_flowF[0]
+        log_R = log_rewards[finishes.bool()]
+        log_fwd_probs = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PF_sa)
+        log_bwd_probs = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PB_sa)
 
         with torch.no_grad():
             edge_loss = ((log_PF_edge_flows - log_PB_edge_flows) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
             leaf_loss = ((log_PF_edge_flows - log_PB_edge_flows) * finishes).pow(2).sum() / finishes.sum()
-            traj_loss = (log_Z_log_fwd_probs - log_R_log_bwd_probs).pow(2).mean()
+            traj_loss = (log_Z + log_fwd_probs - log_R - log_bwd_probs).pow(2).mean()
 
-        loss = (loss_PF - loss_PB).pow(2).mean()
+        if tau > 0:
+            for a, b in zip(model.parameters(), target_model.parameters()):
+                b.data.mul_(1 - tau).add_(tau * a)
+
+        loss = (log_PF_edge_flows - log_PB_edge_flows).pow(2).mean()
 
         loss.backward()
         optimizer.step()

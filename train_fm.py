@@ -4,11 +4,17 @@ import numpy as np
 import argparse
 import pickle
 import os
+from collections import defaultdict
+from itertools import count
+from copy import deepcopy
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
     parser = argparse.ArgumentParser(description='FM-based GFlowNet for hypergrid environment')
+    parser.add_argument(
+        '--tau', type=float, default=0.
+    )
     return parser
 
 
@@ -38,6 +44,7 @@ def main():
     h = args.h
     R0 = args.R0
     bsz = args.bsz
+    tau = args.tau
 
     exp_name = 'fm_{}_{}_{}'.format(n, h, R0)
     logger, exp_path = setup(exp_name, args)
@@ -47,6 +54,9 @@ def main():
     grid = make_grid(n, h)
 
     true_rewards = get_rewards(grid, h, R0)
+    modes = true_rewards.view(-1) >= true_rewards.max()
+    num_modes = modes.sum().item()
+
     true_rewards = true_rewards.view((h,) * n)
     true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
@@ -55,9 +65,14 @@ def main():
     model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     model.to(device)
 
-    optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
+    target_model = deepcopy(model)
+
+    optimizer = optim.Adam(params=model.parameters(), lr=0.01)
 
     total_loss = []
+    total_flow_loss = []
+    total_leaf_loss = []
+
     total_l1_error = []
     total_visited_states = []
 
@@ -71,7 +86,9 @@ def main():
         # initial done trajectories: False
         dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
 
-        trajectories = []
+        batches = []
+
+        trajectories = defaultdict(list)
 
         while torch.any(~dones):
 
@@ -96,7 +113,7 @@ def main():
             for s, a, t in zip(induced_states, actions, terminates.float()):
                 ps, pa = get_parent_states(s, a, n)
                 rs = get_rewards(s, h, R0) if t else torch.tensor(0., device=device)
-                trajectories += [[ps, pa, s.view(1, -1), rs.view(-1), t.view(-1)]]
+                batches += [[ps, pa, s.view(1, -1), rs.view(-1), t.view(-1)]]
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -112,11 +129,11 @@ def main():
 
         # Different number of parent states and children states
         parent_states, parent_actions, induced_states, rewards, finishes = [
-            torch.cat(i) for i in zip(*trajectories)
+            torch.cat(i) for i in zip(*batches)
         ]
 
         batch_idxs = torch.LongTensor(
-            (sum([[i] * len(parent_states) for i, (parent_states, _, _, _, _) in enumerate(trajectories)], []))
+            (sum([[i] * len(parent_states) for i, (parent_states, _, _, _, _) in enumerate(batches)], []))
         ).to(device)
 
         # log_in_flow: log F(s_{t}) = log \sum_{s' in Parent(s_{t})} exp( F(s' --> s_{t}) )
@@ -129,7 +146,11 @@ def main():
         )
 
         # log_out_flow: log F(s_{t}) = log \sum_{s'' in Children(s_{t})} exp( F(s_{t} --> s'') )
-        children_flow = model(get_one_hot(induced_states, h))
+        if tau > 0:
+            with torch.no_grad():
+                children_flow = target_model(get_one_hot(induced_states, h))
+        else:
+            children_flow = model(get_one_hot(induced_states, h))
         children_mask = get_mask(induced_states, h)
         children_f_sa = (
                 (children_flow - 1e10 * children_mask) * (1 - finishes).unsqueeze(1) - 1e10 * finishes.unsqueeze(1)
@@ -138,18 +159,40 @@ def main():
             torch.cat([torch.log(rewards)[:, None], children_f_sa], 1), -1
         )
 
+        with torch.no_grad():
+            flow_loss = ((log_in_flow - log_out_flow) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
+            leaf_loss = ((log_in_flow - log_out_flow) * finishes).pow(2).sum() / finishes.sum()
+
+        if tau > 0:
+            for a, b in zip(model.parameters(), target_model.parameters()):
+                b.data.mul_(1 - tau).add_(tau * a)
+
         loss = (log_in_flow - log_out_flow).pow(2).mean()
 
         loss.backward()
         optimizer.step()
 
         total_loss.append(loss.item())
+        total_flow_loss.append(flow_loss.item())
+        total_leaf_loss.append(leaf_loss.item())
 
         if step % 100 == 0:
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
             l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
+            first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
+            mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
+            logger.info(
+                'Step: %d, \tLoss: %.5f, \tFlow_loss: %.5f, \tLeaf_loss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                    step,
+                    np.array(total_loss[-100:]).mean(),
+                    np.array(total_flow_loss[-100:]).mean(),
+                    np.array(total_leaf_loss[-100:]).mean(),
+                    l1,
+                    mode_founds.sum().item(),
+                    num_modes
+                )
+            )
 
     with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
         torch.save(model, f)
@@ -157,6 +200,8 @@ def main():
     pickle.dump(
         {
             'total_loss': total_loss,
+            'total_flow_loss': total_flow_loss,
+            'total_leaf_loss': total_leaf_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

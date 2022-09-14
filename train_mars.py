@@ -40,6 +40,9 @@ def main():
     grid = make_grid(n, h)
 
     true_rewards = get_rewards(grid, h, R0)
+    modes = true_rewards.view(-1) >= true_rewards.max()
+    num_modes = modes.sum().item()
+
     true_rewards = true_rewards.view((h,) * n)
     true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
@@ -144,7 +147,17 @@ def main():
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
             l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
+            first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
+            mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
+            logger.info(
+                'Step: %d, \tLoss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                    step,
+                    np.array(total_loss[-100:]).mean(),
+                    l1,
+                    mode_founds.sum().item(),
+                    num_modes
+                )
+            )
 
     with open(os.path.join(exp_path, 'model.pt'), 'wb') as f:
         torch.save(model, f)

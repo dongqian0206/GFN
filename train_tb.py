@@ -37,6 +37,9 @@ def main():
     grid = make_grid(n, h)
 
     true_rewards = get_rewards(grid, h, R0)
+    modes = true_rewards.view(-1) >= true_rewards.max()
+    num_modes = modes.sum().item()
+
     true_rewards = true_rewards.view((h,) * n)
     true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
@@ -92,6 +95,11 @@ def main():
             log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
             actions = log_ProbF.softmax(1).multinomial(1)
 
+            induced_states = non_done_states + 0
+            for i, action in enumerate(actions.squeeze(-1)):
+                if action < n:
+                    induced_states[i, action] += 1
+
             loss_TB[~dones] += log_ProbF.gather(dim=1, index=actions).squeeze(1)
 
             terminates = (actions.squeeze(-1) == n)
@@ -124,9 +132,11 @@ def main():
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
             l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
+            first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
+            mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tlogZ: %.5f, tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), log_Z.item(), l1
+                'Step: %d, \tLoss: %.5f, \tlogZ: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                    step, np.array(total_loss[-100:]).mean(), log_Z.item(), l1, mode_founds.sum().item(), num_modes
                 )
             )
 
