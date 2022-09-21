@@ -4,17 +4,11 @@ import numpy as np
 import argparse
 import pickle
 import os
-from collections import defaultdict
-from itertools import count
-from copy import deepcopy
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
     parser = argparse.ArgumentParser(description='FM-based GFlowNet for hypergrid environment')
-    parser.add_argument(
-        '--tau', type=float, default=0.
-    )
     return parser
 
 
@@ -44,9 +38,8 @@ def main():
     h = args.h
     R0 = args.R0
     bsz = args.bsz
-    tau = args.tau
 
-    exp_name = 'fm_{}_{}_{}'.format(n, h, R0)
+    exp_name = 'fm_{}_{}_{}_{}'.format(n, h, R0, args.lr)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -65,9 +58,7 @@ def main():
     model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     model.to(device)
 
-    target_model = deepcopy(model)
-
-    optimizer = optim.Adam(params=model.parameters(), lr=0.01)
+    optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
     total_loss = []
     total_flow_loss = []
@@ -87,8 +78,6 @@ def main():
         dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
 
         batches = []
-
-        trajectories = defaultdict(list)
 
         while torch.any(~dones):
 
@@ -146,11 +135,7 @@ def main():
         )
 
         # log_out_flow: log F(s_{t}) = log \sum_{s'' in Children(s_{t})} exp( F(s_{t} --> s'') )
-        if tau > 0:
-            with torch.no_grad():
-                children_flow = target_model(get_one_hot(induced_states, h))
-        else:
-            children_flow = model(get_one_hot(induced_states, h))
+        children_flow = model(get_one_hot(induced_states, h))
         children_mask = get_mask(induced_states, h)
         children_f_sa = (
                 (children_flow - 1e10 * children_mask) * (1 - finishes).unsqueeze(1) - 1e10 * finishes.unsqueeze(1)
@@ -162,10 +147,6 @@ def main():
         with torch.no_grad():
             flow_loss = ((log_in_flow - log_out_flow) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
             leaf_loss = ((log_in_flow - log_out_flow) * finishes).pow(2).sum() / finishes.sum()
-
-        if tau > 0:
-            for a, b in zip(model.parameters(), target_model.parameters()):
-                b.data.mul_(1 - tau).add_(tau * a)
 
         loss = (log_in_flow - log_out_flow).pow(2).mean()
 

@@ -51,7 +51,8 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    # model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1 + 1])
     model.to(device)
 
     target_model = deepcopy(model)
@@ -132,7 +133,8 @@ def main():
 
         # log F(s_{t}) + log P_F(s_{t+1} | s_{t})
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        # log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
@@ -140,12 +142,15 @@ def main():
 
         # log F(s_{t+1}) + log P_B(s_{t} | s_{t+1})
         i_outputs = model(get_one_hot(induced_states, h))
-        logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        # logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        logits_PB = i_outputs[:, :n]
         if tau > 0:
             with torch.no_grad():
-                log_flowB = target_model(get_one_hot(induced_states, h))[:, 2 * n + 1]
+                log_flowB = target_model(get_one_hot(induced_states, h))[:, n + 1]
+                # log_flowB = target_model(get_one_hot(induced_states, h))[:, 2 * n + 1]
         else:
-            log_flowB = i_outputs[:, 2 * n + 1]
+            # log_flowB = i_outputs[:, 2 * n + 1]
+            log_flowB = i_outputs[:, n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)

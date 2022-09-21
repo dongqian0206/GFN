@@ -67,7 +67,6 @@ def main():
     )
 
     total_loss = []
-    total_reward = []
     total_l1_error = []
     total_visited_states = []
 
@@ -167,21 +166,15 @@ def main():
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_reward.append(get_rewards(states, h, R0).mean().item())
 
         if step % 100 == 0:
             emp_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
             l1 = np.abs(true_density - emp_density / emp_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info(
-                'Step: %d, \tLoss: %.5f, \tR: %.5f, \tL1: %.5f' % (
-                    step, np.array(total_loss[-100:]).mean(), np.array(total_reward[-100:]).mean(), l1
-                )
-            )
+            logger.info('Step: %d, \tLoss: %.5f, \tL1: %.5f' % (step, np.array(total_loss[-100:]).mean(), l1))
 
     pickle.dump(
         {
-            'total_reward': total_reward,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

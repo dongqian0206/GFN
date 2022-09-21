@@ -49,7 +49,7 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1 + 1])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
@@ -127,13 +127,13 @@ def main():
         batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        log_flowB, logits_PB = i_outputs[:, n + 1], i_outputs[:, :n]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
@@ -167,9 +167,16 @@ def main():
 
         loss_fwd = (loss_fwd_PF - loss_fwd_PB).pow(2)
 
-        # Mask the last trajectory balance loss and other losses yielded by one state
+        # Mask the last trajectory balance loss and other losses given by one state
         mask_fwd = torch.LongTensor(sum([[1] * (l - 1) + [0] * 1 for i, l in enumerate(lens)], [])).to(device)
         loss_fwd = (loss_fwd * mask_fwd).sum() / mask_fwd.sum()
+
+        log_PF_edge_flows = log_flowF + log_PF_sa
+        log_PB_edge_flows = log_flowB * (1 - finishes) + log_rewards + log_PB_sa
+
+        last_idxs = torch.LongTensor([i[-1] for i in batch_idxs]).to(device)
+        log_Z_log_fwd_probs = loss_fwd_PF.index_select(0, last_idxs)
+        log_R_log_bwd_probs = loss_fwd_PB.index_select(0, last_idxs)
 
         # log F(s_{l}) + \sum_{t=l}^{n} log P_F(s_{t+1} | s_{t}), for l = 0,...,n
         # log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
@@ -198,13 +205,6 @@ def main():
 
         loss_bwd = (loss_bwd_PF - loss_bwd_PB).pow(2)
         loss_bwd = loss_bwd.mean()
-
-        log_PF_edge_flows = log_flowF + log_PF_sa
-        log_PB_edge_flows = log_flowB * (1 - finishes) + log_rewards + log_PB_sa
-
-        last_idxs = torch.LongTensor([i[-1] for i in batch_idxs]).to(device)
-        log_Z_log_fwd_probs = loss_fwd_PF.index_select(0, last_idxs)
-        log_R_log_bwd_probs = loss_fwd_PB.index_select(0, last_idxs)
 
         with torch.no_grad():
             edge_loss = ((log_PF_edge_flows - log_PB_edge_flows) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()

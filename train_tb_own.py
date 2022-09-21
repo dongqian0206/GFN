@@ -47,7 +47,8 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 1])
+    # model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 1])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1])
     model.to(device)
     log_Z = nn.Parameter(torch.zeros((1,), device=device))
 
@@ -127,7 +128,8 @@ def main():
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        # logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        logits_PB = i_outputs[:, :n]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
