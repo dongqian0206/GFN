@@ -12,7 +12,7 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 def get_train_args():
     parser = argparse.ArgumentParser(description='SubTB-based GFlowNet for hypergrid environment')
     parser.add_argument(
-        '--uniform_PB', type=int, choices=[0, 1], default=1
+        '--uniform_PB', type=int, choices=[0, 1], default=0
     )
     return parser
 
@@ -28,16 +28,18 @@ def main():
     n = args.n
     h = args.h
     R0 = args.R0
+    R1 = args.R1
+    R2 = args.R2
     bsz = args.bsz
 
-    exp_name = 'stb_fwd_{}_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB, args.lr)
+    exp_name = 'stb_fwd_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
 
     grid = make_grid(n, h)
 
-    true_rewards = get_rewards(grid, h, R0)
+    true_rewards = get_rewards(grid, h, R0, R1, R2)
     modes = true_rewards.view(-1) >= true_rewards.max()
     num_modes = modes.sum().item()
 
@@ -46,16 +48,12 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    # model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1 + 1])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
     total_loss = []
-    total_edge_loss = []
-    total_leaf_loss = []
-    total_traj_loss = []
 
     total_l1_error = []
     total_visited_states = []
@@ -77,13 +75,13 @@ def main():
             # ~dones: non-dones
             non_done_states = states[~dones]
 
-            # Output: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
+            # Outputs: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
             with torch.no_grad():
                 outputs = model(get_one_hot(non_done_states, h))
 
-            logits_PF = outputs[:, :n + 1]
+            # Forward policy
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
+            log_ProbF = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
             actions = log_ProbF.softmax(1).multinomial(1)
 
             induced_states = non_done_states + 0
@@ -99,7 +97,7 @@ def main():
             for (i, _), ps, pa, s, t in zip(
                     sorted(m.items()), non_done_states, actions, induced_states, terminates.float()
             ):
-                lr = get_rewards(s, h, R0).log() if t else torch.tensor(0., device=device)
+                lr = get_rewards(s, h, R0, R1, R2).log() if t else torch.tensor(0., device=device)
                 trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), lr.view(-1), t.view(-1)])
 
             for state in non_done_states[terminates]:
@@ -125,15 +123,13 @@ def main():
         batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
-        # log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, n + 1], i_outputs[:, :n]
-        # log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
@@ -164,27 +160,12 @@ def main():
         # log R(s3) + log P_B(s1 | s2) + log P_B(s0 | s1)
         loss_PB = log_flowB * (1 - finishes) + log_rewards * finishes + log_fwd_ProbB
 
-        log_PF_edge_flows = log_flowF + log_PF_sa
-        log_PB_edge_flows = log_flowB * (1 - finishes) + log_rewards * finishes + log_PB_sa
-
-        last_idxs = torch.LongTensor([i[-1] for i in batch_idxs]).to(device)
-        log_Z_log_fwd_probs = loss_PF.index_select(0, last_idxs)
-        log_R_log_bwd_probs = loss_PB.index_select(0, last_idxs)
-
-        with torch.no_grad():
-            edge_loss = ((log_PF_edge_flows - log_PB_edge_flows) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
-            leaf_loss = ((log_PF_edge_flows - log_PB_edge_flows) * finishes).pow(2).sum() / finishes.sum()
-            traj_loss = (log_Z_log_fwd_probs - log_R_log_bwd_probs).pow(2).mean()
-
         loss = (loss_PF - loss_PB).pow(2).mean()
 
         loss.backward()
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_edge_loss.append(edge_loss.item())
-        total_leaf_loss.append(leaf_loss.item())
-        total_traj_loss.append(traj_loss.item())
 
         if step % 100 == 0:
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
@@ -193,13 +174,9 @@ def main():
             first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
             mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tEdge_loss: %.5f, \tLeaf_loss: %.5f, \tTrajectory_loss: %.5f, '
-                '\tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                'Step: %d, \tLoss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
                     step,
                     np.array(total_loss[-100:]).mean(),
-                    np.array(total_edge_loss[-100:]).mean(),
-                    np.array(total_leaf_loss[-100:]).mean(),
-                    np.array(total_traj_loss[-100:]).mean(),
                     l1,
                     mode_founds.sum().item(),
                     num_modes
@@ -212,9 +189,6 @@ def main():
     pickle.dump(
         {
             'total_loss': total_loss,
-            'total_edge_loss': total_edge_loss,
-            'total_leaf_loss': total_leaf_loss,
-            'total_traj_loss': total_traj_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

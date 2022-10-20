@@ -21,6 +21,12 @@ def add_args(parser):
         '--R0', type=float, default=1e-3
     )
     parser.add_argument(
+        '--R1', type=float, default=0.5
+    )
+    parser.add_argument(
+        '--R2', type=float, default=2
+    )
+    parser.add_argument(
         '--lr', type=float, default=1e-3
     )
     parser.add_argument(
@@ -81,9 +87,9 @@ def make_grid(n, h):
     return grid
 
 
-def get_rewards(x, h, R0):
+def get_rewards(x, h, R0, R1=0.5, R2=2):
     ax = abs(x / (h - 1) - 0.5)
-    return R0 + 0.5 * (0.25 < ax).prod(-1) + 2 * ((0.3 < ax) * (ax < 0.4)).prod(-1)
+    return R0 + R1 * (0.25 < ax).prod(-1) + R2 * ((0.3 < ax) * (ax < 0.4)).prod(-1)
 
 
 def make_model(num_units, tail=None):

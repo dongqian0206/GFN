@@ -37,6 +37,8 @@ def main():
     n = args.n
     h = args.h
     R0 = args.R0
+    R1 = args.R1
+    R2 = args.R2
     bsz = args.bsz
 
     exp_name = 'fm_{}_{}_{}_{}'.format(n, h, R0, args.lr)
@@ -46,7 +48,7 @@ def main():
 
     grid = make_grid(n, h)
 
-    true_rewards = get_rewards(grid, h, R0)
+    true_rewards = get_rewards(grid, h, R0, R1, R2)
     modes = true_rewards.view(-1) >= true_rewards.max()
     num_modes = modes.sum().item()
 
@@ -61,8 +63,6 @@ def main():
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
     total_loss = []
-    total_flow_loss = []
-    total_leaf_loss = []
 
     total_l1_error = []
     total_visited_states = []
@@ -101,7 +101,7 @@ def main():
             # Update batches
             for s, a, t in zip(induced_states, actions, terminates.float()):
                 ps, pa = get_parent_states(s, a, n)
-                rs = get_rewards(s, h, R0) if t else torch.tensor(0., device=device)
+                rs = get_rewards(s, h, R0, R1, R2) if t else torch.tensor(0., device=device)
                 batches += [[ps, pa, s.view(1, -1), rs.view(-1), t.view(-1)]]
 
             for state in non_done_states[terminates]:
@@ -144,18 +144,12 @@ def main():
             torch.cat([torch.log(rewards)[:, None], children_f_sa], 1), -1
         )
 
-        with torch.no_grad():
-            flow_loss = ((log_in_flow - log_out_flow) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
-            leaf_loss = ((log_in_flow - log_out_flow) * finishes).pow(2).sum() / finishes.sum()
-
         loss = (log_in_flow - log_out_flow).pow(2).mean()
 
         loss.backward()
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_flow_loss.append(flow_loss.item())
-        total_leaf_loss.append(leaf_loss.item())
 
         if step % 100 == 0:
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
@@ -164,11 +158,9 @@ def main():
             first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
             mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tFlow_loss: %.5f, \tLeaf_loss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                'Step: %d, \tLoss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
                     step,
                     np.array(total_loss[-100:]).mean(),
-                    np.array(total_flow_loss[-100:]).mean(),
-                    np.array(total_leaf_loss[-100:]).mean(),
                     l1,
                     mode_founds.sum().item(),
                     num_modes
@@ -181,8 +173,6 @@ def main():
     pickle.dump(
         {
             'total_loss': total_loss,
-            'total_flow_loss': total_flow_loss,
-            'total_leaf_loss': total_leaf_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],
