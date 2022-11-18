@@ -117,10 +117,10 @@ def main():
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
-        # batch_idxs = [[0, 1, 2, 3, 4], [5, 6, 7], [8], ...]
+        # transition_idxs = [[0, 1, 2, 3, 4], [5, 6, 7], [8], ...]
         idxs = iter(range(parent_states.size(0)))
         lens = [len(traj) for traj in trajectories.values()]
-        batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
+        transition_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
         log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
@@ -135,32 +135,33 @@ def main():
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
+        log_flowB = log_flowB * (1 - finishes) + log_rewards * finishes
 
         # log F(s_{0}) + \sum_{t=0}^{l} log P_F(s_{t+1} | s_{t}), for l = 0,...,n
         # log P_F(s1 | s0)
         # log P_F(s1 | s0) + log P_F(s2 | s1)
         # log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
-        log_fwd_ProbF = torch.cat(
-            [log_PF_sa.index_select(0, i).cumsum(0) for i in batch_idxs]
+        log_ProbF = torch.cat(
+            [log_PF_sa.index_select(0, i).cumsum(0) for i in transition_idxs]
         )
-        # log F(s0) + log P_F(s1 | s0)
-        # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1)
-        # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
-        loss_PF = log_flowF[0] + log_fwd_ProbF
+        # log F(s0 --> s1)               = log F(s0) + log P_F(s1 | s0)
+        # log F(s0 --> s1 --> s2)        = log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1)
+        # log F(s0 --> s1 --> s2 --> sf) = log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
+        log_PF = log_flowF[0] + log_ProbF
 
         # log F(s_{l+1}) + \sum_{t=0}^{l} log P_B(s_{t} | s_{t+1}), for l = 0,...,n
         # log P_B(s0 | s1)
         # log P_B(s0 | s1) + log P_B(s1 | s2)
         # log P_B(s0 | s1) + log P_B(s1 | s2)
-        log_fwd_ProbB = torch.cat(
-            [log_PB_sa.index_select(0, i).cumsum(0) for i in batch_idxs]
+        log_ProbB = torch.cat(
+            [log_PB_sa.index_select(0, i).cumsum(0) for i in transition_idxs]
         )
-        # log F(s1) + log P_B(s0 | s1)
-        # log F(s2) + log P_B(s1 | s2) + log P_B(s0 | s1)
-        # log R(s3) + log P_B(s1 | s2) + log P_B(s0 | s1)
-        loss_PB = log_flowB * (1 - finishes) + log_rewards * finishes + log_fwd_ProbB
+        # log F(s0 --> s1)               = log F(s1) + log P_B(s0 | s1)
+        # log F(s0 --> s1 --> s2)        = log F(s2) + log P_B(s1 | s2) + log P_B(s0 | s1)
+        # log F(s0 --> s1 --> s2 --> sf) = log R(s2) + log P_B(s1 | s2) + log P_B(s0 | s1)
+        log_PB = log_flowB + log_ProbB
 
-        loss = (loss_PF - loss_PB).pow(2).mean()
+        loss = (log_PF - log_PB).pow(2).mean()
 
         loss.backward()
         optimizer.step()

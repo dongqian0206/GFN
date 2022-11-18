@@ -82,29 +82,30 @@ def main():
             # ~dones: non-dones
             non_done_states = states[~dones]
 
-            # Outputs: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
+            # Outputs: [logits_PF, logits_PB]
             with torch.no_grad():
                 outputs = model(get_one_hot(non_done_states, h))
 
             # Forward policy
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
-            actions = log_ProbF.softmax(1).multinomial(1)
+            log_probs = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
+            actions = log_probs.softmax(1).multinomial(1)
 
-            induced_states = non_done_states + 0
+            child_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
-                    induced_states[i, action] += 1
+                    child_states[i, action] += 1
 
             terminates = (actions.squeeze(-1) == n)
 
             # Update batches
             c = count(0)
             m = {j: next(c) for j in range(bsz) if not dones[j]}
-            for (i, _), ps, pa, s in zip(
-                    sorted(m.items()), non_done_states, actions, induced_states
+            for (i, _), p, a, c, t in zip(
+                    sorted(m.items()), non_done_states, actions, child_states, terminates
             ):
-                trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1)])
+                lr = get_rewards(c, h, R0, R1, R2).log() if t else torch.tensor(0., device=device)
+                trajectories[i].append([p.view(1, -1), a.view(1, -1), c.view(1, -1), lr.view(-1), t.view(-1)])
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -116,9 +117,9 @@ def main():
             dones[~dones] |= terminates
 
             # Update non-done trajectories
-            states[~dones] = induced_states[~terminates]
+            states[~dones] = child_states[~terminates]
 
-        parent_states, parent_actions, induced_states = [
+        parent_states, parent_actions, child_states, log_rewards, finishes = [
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
@@ -126,16 +127,18 @@ def main():
             (sum([[i] * len(traj) for i, traj in enumerate(trajectories.values())], []))
         ).to(device)
 
+        # log F(s0 --> s1 --> s2 --> sf) = log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
         p_outputs = model(get_one_hot(parent_states, h))
         logits_PF = p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        i_outputs = model(get_one_hot(induced_states, h))
-        logits_PB = i_outputs[:, n + 1:2 * n + 1]
+        # log F(s0 --> s1 --> s2 --> sf) = log R(s2) + log P_B(s0 | s1) + log P_B(s1 | s2)
+        c_outputs = model(get_one_hot(child_states, h))
+        logits_PB = c_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
-        edge_mask = get_mask(induced_states, h, is_backward=True)
+        edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
@@ -143,9 +146,9 @@ def main():
         log_PF = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PF_sa)
         log_PB = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PB_sa)
 
-        log_R = get_rewards(states, h, R0, R1, R2).log()
-
-        loss = (log_PF + log_Z - log_PB - log_R).pow(2).mean()
+        # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
+        # log R(s2) + log P_B(s0 | s1) + log P_B(s1 | s2)
+        loss = ((log_Z + log_PF) - (log_rewards[finishes] + log_PB)).pow(2).mean()
 
         loss.backward()
         optimizer.step()
@@ -174,7 +177,6 @@ def main():
 
     pickle.dump(
         {
-            'total_loss': total_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

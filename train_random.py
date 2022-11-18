@@ -62,10 +62,10 @@ def main():
             probs = (1 - prob_mask) / torch.sum(1 - prob_mask, dim=1, keepdim=True)
             actions = probs.multinomial(1)
 
-            induced_states = non_done_states + 0
+            child_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
-                    induced_states[i, action] += 1
+                    child_states[i, action] += 1
 
             terminates = (actions.squeeze(-1) == n)
 
@@ -79,7 +79,7 @@ def main():
             dones[~dones] |= terminates
 
             # Update non-done trajectories
-            states[~dones] = induced_states[~terminates]
+            states[~dones] = child_states[~terminates]
 
         if step % 100 == 0:
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)

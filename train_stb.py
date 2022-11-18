@@ -14,9 +14,6 @@ def get_train_args():
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=1
     )
-    parser.add_argument(
-        '--weight', type=float, default=1
-    )
     return parser
 
 
@@ -33,7 +30,7 @@ def main():
     R0 = args.R0
     bsz = args.bsz
 
-    exp_name = 'stb_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB, args.lr, args.weight)
+    exp_name = 'stb_{}_{}_{}_{}_{}'.format(n, h, R0, args.uniform_PB, args.lr)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -49,15 +46,12 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 1 + 1])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
 
     total_loss = []
-    total_edge_loss = []
-    total_leaf_loss = []
-    total_traj_loss = []
 
     total_l1_error = []
     total_visited_states = []
@@ -83,9 +77,8 @@ def main():
             with torch.no_grad():
                 outputs = model(get_one_hot(non_done_states, h))
 
-            logits_PF = outputs[:, :n + 1]
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
+            log_ProbF = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
             actions = log_ProbF.softmax(1).multinomial(1)
 
             induced_states = non_done_states + 0
@@ -127,13 +120,13 @@ def main():
         batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, n + 1], i_outputs[:, :n]
+        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
@@ -171,13 +164,6 @@ def main():
         mask_fwd = torch.LongTensor(sum([[1] * (l - 1) + [0] * 1 for i, l in enumerate(lens)], [])).to(device)
         loss_fwd = (loss_fwd * mask_fwd).sum() / mask_fwd.sum()
 
-        log_PF_edge_flows = log_flowF + log_PF_sa
-        log_PB_edge_flows = log_flowB * (1 - finishes) + log_rewards + log_PB_sa
-
-        last_idxs = torch.LongTensor([i[-1] for i in batch_idxs]).to(device)
-        log_Z_log_fwd_probs = loss_fwd_PF.index_select(0, last_idxs)
-        log_R_log_bwd_probs = loss_fwd_PB.index_select(0, last_idxs)
-
         # log F(s_{l}) + \sum_{t=l}^{n} log P_F(s_{t+1} | s_{t}), for l = 0,...,n
         # log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
         # log P_F(s2 | s1) + log P_F(sf | s2)
@@ -206,20 +192,12 @@ def main():
         loss_bwd = (loss_bwd_PF - loss_bwd_PB).pow(2)
         loss_bwd = loss_bwd.mean()
 
-        with torch.no_grad():
-            edge_loss = ((log_PF_edge_flows - log_PB_edge_flows) * (1 - finishes)).pow(2).sum() / (1 - finishes).sum()
-            leaf_loss = ((log_PF_edge_flows - log_PB_edge_flows) * finishes).pow(2).sum() / finishes.sum()
-            traj_loss = (log_Z_log_fwd_probs - log_R_log_bwd_probs).pow(2).mean()
-
-        loss = loss_fwd + args.weight * loss_bwd
+        loss = loss_fwd + loss_bwd
 
         loss.backward()
         optimizer.step()
 
         total_loss.append(loss.item())
-        total_edge_loss.append(edge_loss.item())
-        total_leaf_loss.append(leaf_loss.item())
-        total_traj_loss.append(traj_loss.item())
 
         if step % 100 == 0:
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
@@ -228,13 +206,9 @@ def main():
             first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
             mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
             logger.info(
-                'Step: %d, \tLoss: %.5f, \tEdge_loss: %.5f, \tLeaf_loss: %.5f, \tTrajectory_loss: %.5f, '
-                '\tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                'Step: %d, \tLoss: %.5f, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
                     step,
                     np.array(total_loss[-100:]).mean(),
-                    np.array(total_edge_loss[-100:]).mean(),
-                    np.array(total_leaf_loss[-100:]).mean(),
-                    np.array(total_traj_loss[-100:]).mean(),
                     l1,
                     mode_founds.sum().item(),
                     num_modes
@@ -247,9 +221,6 @@ def main():
     pickle.dump(
         {
             'total_loss': total_loss,
-            'total_edge_loss': total_edge_loss,
-            'total_leaf_loss': total_leaf_loss,
-            'total_traj_loss': total_traj_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

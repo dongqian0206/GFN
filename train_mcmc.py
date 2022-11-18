@@ -22,6 +22,8 @@ def main():
     n = args.n
     h = args.h
     R0 = args.R0
+    R1 = args.R1
+    R2 = args.R2
     bsz = args.bsz
 
     exp_name = 'mcmc_{}_{}_{}'.format(n, h, R0)
@@ -31,7 +33,10 @@ def main():
 
     grid = make_grid(n, h)
 
-    true_rewards = get_rewards(grid, h, R0)
+    true_rewards = get_rewards(grid, h, R0, R1, R2)
+    modes = true_rewards.view(-1) >= true_rewards.max()
+    num_modes = modes.sum().item()
+
     true_rewards = true_rewards.view((h,) * n)
     true_density = true_rewards.log().flatten().softmax(0).cpu().numpy()
 
@@ -45,7 +50,7 @@ def main():
 
     for step in range(1, args.num_steps + 1):
 
-        pre_rewards = get_rewards(states, h, R0)
+        pre_rewards = get_rewards(states, h, R0, R1, R2)
 
         actions = torch.randint(0, n * 2, (bsz,), device=device)
 
@@ -76,7 +81,16 @@ def main():
             empirical_density = np.bincount(total_visited_states[-200000:], minlength=len(true_density)).astype(float)
             l1 = np.abs(true_density - empirical_density / empirical_density.sum()).mean()
             total_l1_error.append((len(total_visited_states), l1))
-            logger.info('Step: %d, \tL1: %.5f' % (step, l1))
+            first_state_founds = torch.from_numpy(first_visited_states)[modes].long()
+            mode_founds = (0 <= first_state_founds) & (first_state_founds <= step)
+            logger.info(
+                'Step: %d, \tL1: %.5f, \t\tModes found: [%d/%d]' % (
+                    step,
+                    l1,
+                    mode_founds.sum().item(),
+                    num_modes
+                )
+            )
 
     pickle.dump(
         {

@@ -84,25 +84,26 @@ def main():
             # ~dones: non-dones
             non_done_states = states[~dones]
 
+            # Outputs: [logits_PF]
             with torch.no_grad():
-                logits = model(get_one_hot(non_done_states, h))
+                outputs = model(get_one_hot(non_done_states, h))
 
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(logits - 1e10 * prob_mask, -1)
-            actions = log_ProbF.softmax(1).multinomial(1)
+            log_probs = torch.log_softmax(outputs - 1e10 * prob_mask, -1)
+            actions = log_probs.softmax(1).multinomial(1)
 
-            induced_states = non_done_states + 0
+            child_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
-                    induced_states[i, action] += 1
+                    child_states[i, action] += 1
 
             terminates = (actions.squeeze(-1) == n)
 
             # Update batches
-            for s, a, t in zip(induced_states, actions, terminates.float()):
-                ps, pa = get_parent_states(s, a, n)
-                rs = get_rewards(s, h, R0, R1, R2) if t else torch.tensor(0., device=device)
-                batches += [[ps, pa, s.view(1, -1), rs.view(-1), t.view(-1)]]
+            for c, a, t in zip(child_states, actions, terminates.float()):
+                ps, pa = get_parent_states(c, a, n)
+                rs = get_rewards(c, h, R0, R1, R2) if t else torch.tensor(0., device=device)
+                batches += [[ps, pa, c.view(1, -1), rs.view(-1), t.view(-1)]]
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -114,10 +115,10 @@ def main():
             dones[~dones] |= terminates
 
             # Update non-done trajectories
-            states[~dones] = induced_states[~terminates]
+            states[~dones] = child_states[~terminates]
 
         # Different number of parent states and children states
-        parent_states, parent_actions, induced_states, rewards, finishes = [
+        parent_states, parent_actions, child_states, rewards, finishes = [
             torch.cat(i) for i in zip(*batches)
         ]
 
@@ -131,17 +132,17 @@ def main():
         parent_mask = get_mask(parent_states, h)
         parent_f_sa = (parent_flow - 1e10 * parent_mask).gather(dim=1, index=parent_actions.unsqueeze(1)).squeeze(1)
         log_in_flow = torch.log(
-            torch.zeros((induced_states.size(0),), device=device).index_add_(0, batch_idxs, torch.exp(parent_f_sa))
+            torch.zeros((child_states.size(0),), device=device).index_add_(0, batch_idxs, torch.exp(parent_f_sa))
         )
 
-        # log_out_flow: log F(s_{t}) = log \sum_{s'' in Children(s_{t})} exp( F(s_{t} --> s'') )
-        children_flow = model(get_one_hot(induced_states, h))
-        children_mask = get_mask(induced_states, h)
-        children_f_sa = (
-                (children_flow - 1e10 * children_mask) * (1 - finishes).unsqueeze(1) - 1e10 * finishes.unsqueeze(1)
+        # log_out_flow: log F(s_{t}) = log \sum_{s'' in Child(s_{t})} exp( F(s_{t} --> s'') )
+        child_flow = model(get_one_hot(child_states, h))
+        child_mask = get_mask(child_states, h)
+        child_f_sa = (
+                (child_flow - 1e10 * child_mask) * (1 - finishes).unsqueeze(1) - 1e10 * finishes.unsqueeze(1)
         )
         log_out_flow = torch.logsumexp(
-            torch.cat([torch.log(rewards)[:, None], children_f_sa], 1), -1
+            torch.cat([torch.log(rewards)[:, None], child_f_sa], 1), -1
         )
 
         loss = (log_in_flow - log_out_flow).pow(2).mean()
@@ -172,7 +173,6 @@ def main():
 
     pickle.dump(
         {
-            'total_loss': total_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

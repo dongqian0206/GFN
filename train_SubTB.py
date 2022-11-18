@@ -51,7 +51,8 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    # model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 2])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
@@ -125,13 +126,15 @@ def main():
         batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in traj_lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        # log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        # log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        log_flowB, logits_PB = i_outputs[:, n + 1], i_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
