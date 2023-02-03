@@ -135,10 +135,9 @@ def main():
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
-        # We add one zero column, such that we can define that log P_B(sn | sf) = 0.
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
-        log_flowB = log_flowB * (1 - finishes) + log_rewards * finishes
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
+        log_flowB = log_flowB * (1 - finishes) + log_rewards * finishes
 
         # [log F(s0) + log P_F(s1 | s0)] - [log F(s1) + log P_B(s0 | s1)]
         # [log F(s1) + log P_F(s2 | s1)] - [log F(s2) + log P_B(s1 | s2)]
@@ -171,6 +170,7 @@ def main():
 
     pickle.dump(
         {
+            'total_loss': total_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

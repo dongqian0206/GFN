@@ -117,7 +117,7 @@ def main():
             # Update non-done trajectories
             states[~dones] = child_states[~terminates]
 
-        # Different number of parent states and children states
+        # Different number of parent states and children states (#parent_states > #child_states)
         parent_states, parent_actions, child_states, rewards, finishes = [
             torch.cat(i) for i in zip(*batches)
         ]
@@ -173,6 +173,7 @@ def main():
 
     pickle.dump(
         {
+            'total_loss': total_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

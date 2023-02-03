@@ -57,7 +57,9 @@ def main():
     log_Z = nn.Parameter(torch.zeros((1,), device=device))
 
     optimizer = optim.Adam(
-        [{'params': model.parameters(), 'lr': args.lr}, {'params': [log_Z], 'lr': args.lr_log_Z}]
+        [
+            {'params': model.parameters(), 'lr': args.lr}, {'params': [log_Z], 'lr': args.lr_log_Z}
+        ]
     )
 
     total_loss = []
@@ -127,19 +129,18 @@ def main():
             (sum([[i] * len(traj) for i, traj in enumerate(trajectories.values())], []))
         ).to(device)
 
-        # log F(s0 --> s1 --> s2 --> sf) = log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
         p_outputs = model(get_one_hot(parent_states, h))
         logits_PF = p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        # log F(s0 --> s1 --> s2 --> sf) = log R(s2) + log P_B(s0 | s1) + log P_B(s1 | s2)
         c_outputs = model(get_one_hot(child_states, h))
         logits_PB = c_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
+        # We add one zero column, such that we can set log P_B(sn | sf) = 0.
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
 
@@ -177,6 +178,7 @@ def main():
 
     pickle.dump(
         {
+            'total_loss': total_loss,
             'total_visited_states': total_visited_states,
             'first_visited_states': first_visited_states,
             'num_visited_states_so_far': [a[0] for a in total_l1_error],

@@ -10,7 +10,7 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='SubTB-based GFlowNet for hypergrid environment')
+    parser = argparse.ArgumentParser(description='SubTB-lambda-based GFlowNet for hypergrid environment')
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=0
     )
@@ -51,8 +51,7 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    # model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 2])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
@@ -120,21 +119,19 @@ def main():
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
-        # batch_idxs = [[0, 1, 2, 3, 4], [5, 6, 7], [8], ...]
+        # transition_idxs = [[0, 1, 2, 3, 4], [5, 6, 7], [8], ...]
         traj_lens = [len(traj) for traj in trajectories.values()]
         idxs = iter(range(parent_states.size(0)))
-        batch_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in traj_lens]
+        transition_idxs = [torch.LongTensor(list(islice(idxs, i))).to(device) for i in traj_lens]
 
         p_outputs = model(get_one_hot(parent_states, h))
-        # log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
-        log_flowF, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
+        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
         i_outputs = model(get_one_hot(induced_states, h))
-        # log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
-        log_flowB, logits_PB = i_outputs[:, n + 1], i_outputs[:, n + 1:2 * n + 1]
+        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(induced_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
@@ -149,10 +146,11 @@ def main():
             weights = ((args.gamma ** idx) * (traj_len + 1 - idx)).sum()
             for sub_traj_len in range(1, traj_len + 1):
                 traj_idxs = torch.arange(sub_traj_len).tile(traj_len - sub_traj_len + 1, 1)
-                batch_idx = batch_idxs[i][traj_idxs + torch.arange(traj_idxs.size(0)).view(-1, 1)]
+                batch_idx = transition_idxs[i][traj_idxs + torch.arange(traj_idxs.size(0)).view(-1, 1)]
                 loss_PF = log_PF_sa[batch_idx].sum(-1) + log_flowF[batch_idx][:, 0]
                 loss_PB = log_PB_sa[batch_idx].sum(-1) + log_flowB[batch_idx][:, -1]
-                sub_traj_loss = ((args.gamma ** sub_traj_len) / weights) * (loss_PF - loss_PB).pow(2).sum()
+                traj_len_weight = (args.gamma ** sub_traj_len) / weights
+                sub_traj_loss = traj_len_weight * (loss_PF - loss_PB).pow(2).sum()
                 loss = loss + sub_traj_loss
 
         loss.backward()
