@@ -87,10 +87,10 @@ def main():
             log_ProbF = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
             actions = log_ProbF.softmax(1).multinomial(1)
 
-            induced_states = non_done_states + 0
+            child_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):
                 if action < n:
-                    induced_states[i, action] += 1
+                    child_states[i, action] += 1
 
             terminates = (actions.squeeze(-1) == n)
 
@@ -98,7 +98,7 @@ def main():
             c = count(0)
             m = {j: next(c) for j in range(bsz) if not dones[j]}
             for (i, _), ps, pa, s, t in zip(
-                    sorted(m.items()), non_done_states, actions, induced_states, terminates.float()
+                    sorted(m.items()), non_done_states, actions, child_states, terminates.float()
             ):
                 lrs = get_rewards(s, h, R0, R1, R2).log() if t else torch.tensor(0., device=device)
                 trajectories[i].append([ps.view(1, -1), pa.view(1, -1), s.view(1, -1), lrs.view(-1), t.view(-1)])
@@ -113,9 +113,9 @@ def main():
             dones[~dones] |= terminates
 
             # Update non-done trajectories
-            states[~dones] = induced_states[~terminates]
+            states[~dones] = child_states[~terminates]
 
-        parent_states, parent_actions, induced_states, log_rewards, finishes = [
+        parent_states, parent_actions, child_states, log_rewards, finishes = [
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
@@ -130,10 +130,10 @@ def main():
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        i_outputs = model(get_one_hot(induced_states, h))
-        log_flowB, logits_PB = i_outputs[:, 2 * n + 1], i_outputs[:, n + 1:2 * n + 1]
+        c_outputs = model(get_one_hot(child_states, h))
+        log_flowB, logits_PB = c_outputs[:, 2 * n + 1], c_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
-        edge_mask = get_mask(induced_states, h, is_backward=True)
+        edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)

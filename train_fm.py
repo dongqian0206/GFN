@@ -126,8 +126,8 @@ def main():
             (sum([[i] * len(parent_states) for i, (parent_states, _, _, _, _) in enumerate(batches)], []))
         ).to(device)
 
-        # log_in_flow: log F(s_{t}) = log \sum_{s' in Parent(s_{t})} exp( F(s' --> s_{t}) )
-        # F(s' --> s_{t}) := F(s', a'), where s_{t} = T(s', a')
+        # log_in_flow: log F(s_{t}) = log \sum_{s' in Parent(s_{t})} exp( f(s' --> s_{t}) )
+        # f(s' --> s_{t}) := f(s', a'), where s_{t} = T(s', a')
         parent_flow = model(get_one_hot(parent_states, h))
         parent_mask = get_mask(parent_states, h)
         parent_f_sa = (parent_flow - 1e10 * parent_mask).gather(dim=1, index=parent_actions.unsqueeze(1)).squeeze(1)
@@ -135,7 +135,7 @@ def main():
             torch.zeros((child_states.size(0),), device=device).index_add_(0, batch_idxs, torch.exp(parent_f_sa))
         )
 
-        # log_out_flow: log F(s_{t}) = log \sum_{s'' in Child(s_{t})} exp( F(s_{t} --> s'') )
+        # log_out_flow: log F(s_{t}) = log \sum_{s'' in Child(s_{t})} exp( f(s_{t} --> s'') )
         child_flow = model(get_one_hot(child_states, h))
         child_mask = get_mask(child_states, h)
         child_f_sa = (
