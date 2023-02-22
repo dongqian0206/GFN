@@ -140,7 +140,6 @@ def main():
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
-        # We add one zero column, such that we can set log P_B(sn | sf) = 0.
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
 

@@ -78,7 +78,7 @@ def main():
             # ~dones: non-dones
             non_done_states = states[~dones]
 
-            # Outputs: [logits_PF, logits_PB], where for logits_PF, the last position corresponds to 'stop' action.
+            # Outputs: [logits_PF, logits_PB, logF]
             with torch.no_grad():
                 outputs = model(get_one_hot(non_done_states, h))
 
@@ -147,10 +147,10 @@ def main():
             for sub_traj_len in range(1, traj_len + 1):
                 traj_idxs = torch.arange(sub_traj_len).tile(traj_len - sub_traj_len + 1, 1)
                 batch_idx = transition_idxs[i][traj_idxs + torch.arange(traj_idxs.size(0)).view(-1, 1)]
-                loss_PF = log_PF_sa[batch_idx].sum(-1) + log_flowF[batch_idx][:, 0]
-                loss_PB = log_PB_sa[batch_idx].sum(-1) + log_flowB[batch_idx][:, -1]
+                loss_trajF = log_PF_sa[batch_idx].sum(-1) + log_flowF[batch_idx][:, 0]
+                loss_trajB = log_PB_sa[batch_idx].sum(-1) + log_flowB[batch_idx][:, -1]
                 traj_len_weight = (args.gamma ** sub_traj_len) / weights
-                sub_traj_loss = traj_len_weight * (loss_PF - loss_PB).pow(2).sum()
+                sub_traj_loss = traj_len_weight * (loss_trajF - loss_trajB).pow(2).sum()
                 loss = loss + sub_traj_loss
 
         loss.backward()
