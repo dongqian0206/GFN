@@ -10,7 +10,7 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='SubTB-lambda-based GFlowNet for hypergrid environment')
+    parser = argparse.ArgumentParser(description='SubTB-lambda-based GFlowNets for hypergrid environments')
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=0
     )
@@ -35,7 +35,9 @@ def main():
     R2 = args.R2
     bsz = args.bsz
 
-    exp_name = 'SubTB_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB, args.gamma)
+    exp_name = 'SubTB_{}_{}_{}_{}_{}_{}_{}_{}'.format(
+        n, h, R0, args.lr, args.uniform_PB, args.gamma, args.temp, args.epsilon
+    )
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -84,8 +86,13 @@ def main():
 
             # Forward policy
             prob_mask = get_mask(non_done_states, h)
-            log_ProbF = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
-            actions = log_ProbF.softmax(1).multinomial(1)
+            log_probs = torch.log_softmax(outputs[:, :n + 1] - 1e10 * prob_mask, -1)
+
+            temp_probs = (log_probs / args.temp).softmax(1)
+            uniform_probs = (1 - prob_mask) / (1 - prob_mask).sum(dim=-1, keepdim=True)
+            sampling_probs = (1 - args.epsilon) * temp_probs + args.epsilon * uniform_probs
+
+            actions = sampling_probs.multinomial(1)
 
             child_states = non_done_states + 0
             for i, action in enumerate(actions.squeeze(-1)):

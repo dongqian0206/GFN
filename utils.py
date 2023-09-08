@@ -42,6 +42,12 @@ def add_args(parser):
         '--bsz', type=int, default=16
     )
     parser.add_argument(
+        '--temp', type=float, default=1
+    )
+    parser.add_argument(
+        '--epsilon', type=float, default=0
+    )
+    parser.add_argument(
         '--seed', type=int, default=42
     )
     args = parser.parse_args()
