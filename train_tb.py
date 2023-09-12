@@ -132,7 +132,7 @@ def main():
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
-        batch_idxs = torch.LongTensor(
+        batch_ids = torch.LongTensor(
             (sum([[i] * len(traj) for i, traj in enumerate(trajectories.values())], []))
         ).to(device)
 
@@ -150,8 +150,8 @@ def main():
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
 
-        log_PF = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PF_sa)
-        log_PB = torch.zeros((bsz,), device=device).index_add_(0, batch_idxs, log_PB_sa)
+        log_PF = torch.zeros((bsz,), device=device).index_add_(0, batch_ids, log_PF_sa)
+        log_PB = torch.zeros((bsz,), device=device).index_add_(0, batch_ids, log_PB_sa)
 
         # log F(s0) + log P_F(s1 | s0) + log P_F(s2 | s1) + log P_F(sf | s2)
         # log R(s2) + log P_B(s0 | s1) + log P_B(s1 | s2)

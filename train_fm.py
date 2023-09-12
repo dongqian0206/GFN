@@ -129,7 +129,7 @@ def main():
             torch.cat(i) for i in zip(*batches)
         ]
 
-        batch_idxs = torch.LongTensor(
+        batch_ids = torch.LongTensor(
             (sum([[i] * len(parent_states) for i, (parent_states, _, _, _, _) in enumerate(batches)], []))
         ).to(device)
 
@@ -139,7 +139,7 @@ def main():
         parent_mask = get_mask(parent_states, h)
         parent_f_sa = (parent_flow - 1e10 * parent_mask).gather(dim=1, index=parent_actions.unsqueeze(1)).squeeze(1)
         log_in_flow = torch.log(
-            torch.zeros((child_states.size(0),), device=device).index_add_(0, batch_idxs, torch.exp(parent_f_sa))
+            torch.zeros((child_states.size(0),), device=device).index_add_(0, batch_ids, torch.exp(parent_f_sa))
         )
 
         # log_out_flow: log F(s_{t}) = log \sum_{s'' in Child(s_{t})} exp( f(s_{t} --> s'') )
