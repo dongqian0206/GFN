@@ -83,7 +83,7 @@ def setup(exp_name, args):
 
 
 def make_grid(n, h):
-    grid = torch.zeros((h,) * n + (n,), dtype=torch.long, device=device)
+    grid = torch.zeros((h,) * n + (n,), dtype=torch.long)
     for i in range(n):
         grid_i = torch.linspace(start=0, end=h - 1, steps=h)
         for _ in range(i):
