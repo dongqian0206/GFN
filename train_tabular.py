@@ -18,7 +18,7 @@ def get_train_args():
 
 
 def main():
-    device = torch.device('cpu')
+    device = torch.device('cuda')
 
     parser = get_train_args()
     args = add_args(parser)
@@ -31,8 +31,6 @@ def main():
     R1 = args.R1
     R2 = args.R2
     bsz = args.bsz
-
-    bsz = 1
 
     exp_name = 'tabular_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB)
     logger, exp_path = setup(exp_name, args)

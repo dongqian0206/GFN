@@ -7,9 +7,6 @@ import random
 import os
 
 
-device = torch.device('cuda')
-
-
 def add_args(parser):
     parser.add_argument(
         '--n', type=int, default=2
@@ -116,7 +113,7 @@ def get_mask(states, h, is_backward=False):
     if is_backward:
         return (states == 0).float()
     edge_mask = (states == h - 1).float()
-    stop_mask = torch.zeros((states.size(0), 1), device=device)
+    stop_mask = torch.zeros((states.size(0), 1), device=states.device)
     prob_mask = torch.cat([edge_mask, stop_mask], 1)
     return prob_mask
 
