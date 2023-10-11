@@ -195,7 +195,7 @@ def main():
         open(os.path.join(exp_path, 'out.pkl'), 'wb')
     )
 
-    logger.info('done.')
+    logger.info('Done.')
 
 
 if __name__ == '__main__':
