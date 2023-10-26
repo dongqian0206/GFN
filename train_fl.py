@@ -10,7 +10,7 @@ from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model,
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='DB-based GFlowNets for hypergrid environments')
+    parser = argparse.ArgumentParser(description='Forward-looking-based GFlowNets for hypergrid environments')
     parser.add_argument(
         '--uniform_PB', type=int, choices=[0, 1], default=0
     )
@@ -32,7 +32,7 @@ def main():
     R2 = args.R2
     bsz = args.bsz
 
-    exp_name = 'db_{}_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB, args.temp, args.epsilon)
+    exp_name = 'fl_{}_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB, args.temp, args.epsilon)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -102,8 +102,11 @@ def main():
             for (i, _), p, a, c, t in zip(
                     sorted(m.items()), non_done_states, actions, child_states, terminates.float()
             ):
-                lr = get_rewards(c, h, R0, R1, R2).log() if t else torch.tensor(0., device=device)
-                trajectories[i].append([p.view(1, -1), a.view(1, -1), c.view(1, -1), lr.view(-1), t.view(-1)])
+                lr_p = get_rewards(p, h, R0, R1, R2).log()
+                lr_c = get_rewards(c, h, R0, R1, R2).log()
+                trajectories[i].append(
+                    [p.view(1, -1), a.view(1, -1), c.view(1, -1), lr_p.view(-1), lr_c.view(-1), t.view(-1)]
+                )
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -117,37 +120,38 @@ def main():
             # Update non-done trajectories
             states[~dones] = child_states[~terminates]
 
-        parent_states, parent_actions, child_states, log_rewards, finishes = [
+        parent_states, parent_actions, child_states, log_parent_rewards, log_child_rewards, finishes = [
             torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
         ]
 
-        # log F(s_{t}) + log P_F(s_{t+1} | s_{t})
-        # log F(s0 --> s1) = log F(s0) + log P_F(s1 | s0)
-        # log F(s1 --> s2) = log F(s1) + log P_F(s2 | s1)
-        # log F(s2 --> sf) = log F(s2) + log P_F(sf | s2)
+        # log F˜(s_{t}) + log R(s_{t}) + log P_F(s_{t+1} | s_{t})
+        # log F(s0 --> s1) = log F˜(s0) + log R(s_{0}) + log P_F(s1 | s0)
+        # log F(s1 --> s2) = log F˜(s1) + log R(s_{1}) + log P_F(s2 | s1)
+        # log F(s2 --> sf) = log F˜(s2) + log R(s_{2}) + log P_F(sf | s2)
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_fl_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
         log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
 
-        # log F(s_{t+1}) + log P_B(s_{t} | s_{t+1})
-        # log F(s0 --> s1) = log F(s1) + log P_B(s0 | s1)
-        # log F(s1 --> s2) = log F(s2) + log P_B(s1 | s2)
+        # log F˜(s_{t+1}) + log R(s_{t+1}) + log P_B(s_{t} | s_{t+1})
+        # log F(s0 --> s1) = log F˜(s1) + log R(s_{1}) + log P_B(s0 | s1)
+        # log F(s1 --> s2) = log F˜(s2) + log R(s_{2}) + log P_B(s1 | s2)
         # log F(s2 --> sf) = log R(s2)
         c_outputs = model(get_one_hot(child_states, h))
-        log_flowB, logits_PB = c_outputs[:, 2 * n + 1], c_outputs[:, n + 1:2 * n + 1]
+        log_fl_flowB, logits_PB = c_outputs[:, 2 * n + 1], c_outputs[:, n + 1:2 * n + 1]
         logits_PB = (0 if args.uniform_PB else 1) * logits_PB
         edge_mask = get_mask(child_states, h, is_backward=True)
         log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
         log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
         log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
-        log_flowB = log_flowB * (1 - finishes) + log_rewards * finishes
+        log_fl_flowB = log_fl_flowB * (1 - finishes)
 
-        # [log F(s0) + log P_F(s1 | s0)] - [log F(s1) + log P_B(s0 | s1)]
-        # [log F(s1) + log P_F(s2 | s1)] - [log F(s2) + log P_B(s1 | s2)]
-        # [log F(s2) + log P_F(sf | s2)] - [log R(s2)]
-        loss = ((log_flowF + log_PF_sa) - (log_flowB + log_PB_sa)).pow(2).mean()
+        # [log F˜(s0) + log R(s_{0}) + log P_F(s1 | s0)] - [log F˜(s1) + log R(s_{1}) + log P_B(s0 | s1)]
+        # [log F˜(s1) + log R(s_{1}) + log P_F(s2 | s1)] - [log F˜(s2) + log R(s_{2}) + log P_B(s1 | s2)]
+        # [log F˜(s2) + log R(s_{2}) + log P_F(sf | s2)] - [log R(s2)]
+        loss = (log_fl_flowF + log_parent_rewards + log_PF_sa) - (log_fl_flowB + log_child_rewards + log_PB_sa)
+        loss = loss.pow(2).mean()
 
         loss.backward()
         optimizer.step()

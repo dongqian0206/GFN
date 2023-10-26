@@ -41,9 +41,7 @@ def main():
     R2 = args.R2
     bsz = args.bsz
 
-    exp_name = 'fm_{}_{}_{}_{}_{}_{}'.format(
-        n, h, R0, args.lr, args.temp, args.epsilon
-    )
+    exp_name = 'fm_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.temp, args.epsilon)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)

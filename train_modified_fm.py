@@ -4,21 +4,30 @@ import numpy as np
 import argparse
 import pickle
 import os
-from collections import defaultdict
-from itertools import count
 from utils import add_args, set_seed, setup, make_grid, get_rewards, make_model, get_one_hot, get_mask
 
 
 def get_train_args():
-    parser = argparse.ArgumentParser(description='DB-based GFlowNets for hypergrid environments')
-    parser.add_argument(
-        '--uniform_PB', type=int, choices=[0, 1], default=0
-    )
+    parser = argparse.ArgumentParser(description='Modified FM-based GFlowNets for hypergrid environments')
     return parser
 
 
+def get_parent_states(s, a, n):
+    if a == n:
+        return torch.cat([s.view(1, -1)]), torch.cat([a])
+    parents = []
+    actions = []
+    for i in range(n):
+        if s[i] > 0:
+            ps = s + 0
+            ps[i] -= 1
+            parents += [ps.view(1, -1)]
+            actions += [torch.tensor([i], device=s.device)]
+    return torch.cat(parents), torch.cat(actions)
+
+
 def main():
-    device = torch.device('cuda')
+    device = torch.device('cpu')
 
     parser = get_train_args()
     args = add_args(parser)
@@ -32,7 +41,7 @@ def main():
     R2 = args.R2
     bsz = args.bsz
 
-    exp_name = 'db_{}_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB, args.temp, args.epsilon)
+    exp_name = 'modified_fm_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.temp, args.epsilon)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
@@ -48,7 +57,7 @@ def main():
 
     first_visited_states = -1 * np.ones_like(true_density)
 
-    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [2 * n + 2])
+    model = make_model([n * h] + [args.hidden_size] * args.num_layers + [n + 2])
     model.to(device)
 
     optimizer = optim.Adam(params=model.parameters(), lr=args.lr)
@@ -68,7 +77,7 @@ def main():
         # initial done trajectories: False
         dones = torch.full((bsz,), False, dtype=torch.bool, device=device)
 
-        trajectories = defaultdict(list)
+        batches = []
 
         while torch.any(~dones):
 
@@ -97,13 +106,10 @@ def main():
             terminates = (actions.squeeze(-1) == n)
 
             # Update batches
-            c = count(0)
-            m = {j: next(c) for j in range(bsz) if not dones[j]}
-            for (i, _), p, a, c, t in zip(
-                    sorted(m.items()), non_done_states, actions, child_states, terminates.float()
-            ):
+            for c, a, t in zip(child_states, actions, terminates.float()):
+                ps, pa = get_parent_states(c, a, n)
                 lr = get_rewards(c, h, R0, R1, R2).log() if t else torch.tensor(0., device=device)
-                trajectories[i].append([p.view(1, -1), a.view(1, -1), c.view(1, -1), lr.view(-1), t.view(-1)])
+                batches += [[ps, pa, c.view(1, -1), lr.view(-1), t.view(-1)]]
 
             for state in non_done_states[terminates]:
                 state_id = (state * coordinate).sum().item()
@@ -117,37 +123,31 @@ def main():
             # Update non-done trajectories
             states[~dones] = child_states[~terminates]
 
+        # Different number of parent states and children states (#parent_states > #child_states)
         parent_states, parent_actions, child_states, log_rewards, finishes = [
-            torch.cat(i) for i in zip(*[traj for traj in sum(trajectories.values(), [])])
+            torch.cat(i) for i in zip(*batches)
         ]
 
-        # log F(s_{t}) + log P_F(s_{t+1} | s_{t})
-        # log F(s0 --> s1) = log F(s0) + log P_F(s1 | s0)
-        # log F(s1 --> s2) = log F(s1) + log P_F(s2 | s1)
-        # log F(s2 --> sf) = log F(s2) + log P_F(sf | s2)
+        batch_ids = torch.LongTensor(
+            (sum([[i] * len(parent_states) for i, (parent_states, _, _, _, _) in enumerate(batches)], []))
+        ).to(device)
+
+        # log F(s_{t+1}) = log \sum_{s_{t} in Parent(s_{t+1})} P_F(s_{t+1} | s_{t}) F(s_{t})
         p_outputs = model(get_one_hot(parent_states, h))
-        log_flowF, logits_PF = p_outputs[:, 2 * n + 1], p_outputs[:, :n + 1]
+        log_flowP, logits_PF = p_outputs[:, n + 1], p_outputs[:, :n + 1]
         prob_mask = get_mask(parent_states, h)
         log_ProbF = torch.log_softmax(logits_PF - 1e10 * prob_mask, -1)
-        log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions).squeeze(1)
+        log_PF_sa = log_ProbF.gather(dim=1, index=parent_actions.unsqueeze(1)).squeeze(1)
+        log_in_flow = torch.log(
+            torch.zeros((child_states.size(0),), device=device).index_add_(0, batch_ids, (log_flowP + log_PF_sa).exp())
+        )
 
-        # log F(s_{t+1}) + log P_B(s_{t} | s_{t+1})
-        # log F(s0 --> s1) = log F(s1) + log P_B(s0 | s1)
-        # log F(s1 --> s2) = log F(s2) + log P_B(s1 | s2)
-        # log F(s2 --> sf) = log R(s2)
+        # log F(s_{t+1})
         c_outputs = model(get_one_hot(child_states, h))
-        log_flowB, logits_PB = c_outputs[:, 2 * n + 1], c_outputs[:, n + 1:2 * n + 1]
-        logits_PB = (0 if args.uniform_PB else 1) * logits_PB
-        edge_mask = get_mask(child_states, h, is_backward=True)
-        log_ProbB = torch.log_softmax(logits_PB - 1e10 * edge_mask, -1)
-        log_ProbB = torch.cat([log_ProbB, torch.zeros((log_ProbB.size(0), 1), device=device)], 1)
-        log_PB_sa = log_ProbB.gather(dim=1, index=parent_actions).squeeze(1)
-        log_flowB = log_flowB * (1 - finishes) + log_rewards * finishes
+        log_flowC = c_outputs[:, n + 1]
+        log_flowC = log_flowC * (1 - finishes) + log_rewards * finishes
 
-        # [log F(s0) + log P_F(s1 | s0)] - [log F(s1) + log P_B(s0 | s1)]
-        # [log F(s1) + log P_F(s2 | s1)] - [log F(s2) + log P_B(s1 | s2)]
-        # [log F(s2) + log P_F(sf | s2)] - [log R(s2)]
-        loss = ((log_flowF + log_PF_sa) - (log_flowB + log_PB_sa)).pow(2).mean()
+        loss = (log_in_flow - log_flowC).pow(2).mean()
 
         loss.backward()
         optimizer.step()

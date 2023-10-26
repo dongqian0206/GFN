@@ -35,9 +35,7 @@ def main():
 
     args.lr_log_Z = args.lr * 10
 
-    exp_name = 'tb_{}_{}_{}_{}_{}_{}_{}'.format(
-        n, h, R0, args.lr, args.uniform_PB, args.temp, args.epsilon
-    )
+    exp_name = 'tb_{}_{}_{}_{}_{}_{}_{}'.format(n, h, R0, args.lr, args.uniform_PB, args.temp, args.epsilon)
     logger, exp_path = setup(exp_name, args)
 
     coordinate = h ** torch.arange(n, device=device)
